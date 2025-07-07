@@ -12,3 +12,7 @@ tokio-socks = "0.5.2"
 tokio-splice2 = "0.3.0-rc.13"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[lib]
+name = "geofront"
+crate-type = ["cdylib"]

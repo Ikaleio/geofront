@@ -436,7 +436,11 @@ async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     let reject_msg = if route.disconnect_msg.is_null() {
         "Connection rejected".to_string()
     } else {
-        unsafe { CStr::from_ptr(route.disconnect_msg).to_string_lossy().into() }
+        unsafe {
+            CStr::from_ptr(route.disconnect_msg)
+                .to_string_lossy()
+                .into()
+        }
     };
     let proxy_url = unsafe {
         CStr::from_ptr(route.proxy)
