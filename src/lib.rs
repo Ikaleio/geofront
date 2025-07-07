@@ -65,6 +65,10 @@ pub struct ProxyRoute {
     pub disconnect_msg: *mut c_char,
 }
 
+// The contained raw pointers are only accessed within the same thread and
+// freed before any await points, so it is safe to mark this struct as Send.
+unsafe impl Send for ProxyRoute {}
+
 // Router callback signature
 pub type ProxyRouterFn = extern "C" fn(
     ProxyConnection,
@@ -426,37 +430,41 @@ async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
             CString::new(username).unwrap().as_ptr(),
         )
     };
-    // Custom reject
-    if route.host.is_null() {
-        let reason = if route.disconnect_msg.is_null() {
-            "Connection rejected"
-        } else {
-            unsafe {
-                CStr::from_ptr(route.disconnect_msg)
-                    .to_str()
-                    .unwrap_or("Connection rejected")
-            }
-        };
-        let _ = write_disconnect(&mut inbound, reason).await;
-        unsafe { proxy_free_route(route) };
-        cleanup_conn(conn_id);
-        return;
-    }
-    // Establish outbound
-    let (proxy_url, backend) = unsafe {
-        (
-            CStr::from_ptr(route.proxy)
-                .to_str()
-                .unwrap_or("")
-                .to_string(),
+
+    // Extract route information before any await to keep the future Send
+    let reject = route.host.is_null();
+    let reject_msg = if route.disconnect_msg.is_null() {
+        "Connection rejected".to_string()
+    } else {
+        unsafe { CStr::from_ptr(route.disconnect_msg).to_string_lossy().into() }
+    };
+    let proxy_url = unsafe {
+        CStr::from_ptr(route.proxy)
+            .to_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    let backend = if reject {
+        String::new()
+    } else {
+        unsafe {
             format!(
                 "{}:{}",
                 CStr::from_ptr(route.host).to_str().unwrap_or(""),
                 route.port
-            ),
-        )
+            )
+        }
     };
     unsafe { proxy_free_route(route) };
+
+    // Custom reject
+    if reject {
+        let _ = write_disconnect(&mut inbound, &reject_msg).await;
+        cleanup_conn(conn_id);
+        return;
+    }
+
+    // Establish outbound
     let mut outbound = if proxy_url.starts_with("socks5://") {
         let pa = &proxy_url[9..];
         Socks5Stream::connect(pa, backend.clone())
