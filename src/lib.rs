@@ -131,7 +131,7 @@ pub unsafe extern "C" fn proxy_init_logging(level: *const c_char) -> ProxyError 
     if level.is_null() {
         return PROXY_ERR_BAD_PARAM;
     }
-    let lvl = CStr::from_ptr(level)
+    let lvl = unsafe { CStr::from_ptr(level) }
         .to_str()
         .map_err(|_| PROXY_ERR_BAD_PARAM)
         .unwrap();
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn proxy_set_log_level(level: *const c_char) -> ProxyError
     if level.is_null() {
         return PROXY_ERR_BAD_PARAM;
     }
-    let lvl = CStr::from_ptr(level)
+    let lvl = unsafe { CStr::from_ptr(level) }
         .to_str()
         .map_err(|_| PROXY_ERR_BAD_PARAM)
         .unwrap();
@@ -164,13 +164,13 @@ pub unsafe extern "C" fn proxy_set_log_level(level: *const c_char) -> ProxyError
 
 pub unsafe extern "C" fn proxy_free_route(route: ProxyRoute) {
     if !route.host.is_null() {
-        let _ = CString::from_raw(route.host);
+        let _ = unsafe { CString::from_raw(route.host) };
     }
     if !route.proxy.is_null() {
-        let _ = CString::from_raw(route.proxy);
+        let _ = unsafe { CString::from_raw(route.proxy) };
     }
     if !route.disconnect_msg.is_null() {
-        let _ = CString::from_raw(route.disconnect_msg);
+        let _ = unsafe { CString::from_raw(route.disconnect_msg) };
     }
 }
 
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn proxy_start_listener(
     if bind_addr.is_null() || out_listener.is_null() {
         return PROXY_ERR_BAD_PARAM;
     }
-    let addr = CStr::from_ptr(bind_addr)
+    let addr = unsafe { CStr::from_ptr(bind_addr) }
         .to_str()
         .map_err(|_| PROXY_ERR_BAD_PARAM)
         .unwrap();
@@ -237,7 +237,7 @@ pub unsafe extern "C" fn proxy_start_listener(
                 }
             }
         });
-    ptr::write(out_listener, id);
+    unsafe { ptr::write(out_listener, id) };
     LISTENER_STATE.lock().unwrap().listeners.insert(id, handle);
     PROXY_OK
 }
