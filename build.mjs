@@ -58,7 +58,7 @@ const result = await Bun.build({
     entrypoints: ['src/geofront.ts', 'src/ffi_worker.ts'],
     outdir: './dist',
     target: 'bun',
-    splitting: false, // I don't like chunking
+    splitting: true,
     sourcemap: 'external',
     minify: true,
 });

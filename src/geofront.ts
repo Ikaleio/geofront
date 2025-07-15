@@ -2,6 +2,7 @@
 import { wrap, proxy } from 'comlink'
 import type { Remote } from 'comlink'
 import { CString, type Pointer } from 'bun:ffi'
+import { existsSync } from 'fs'
 
 export interface RouteEvent {
 	connId: bigint
@@ -111,7 +112,17 @@ export class Geofront {
 
 	constructor() {
 		// 创建 Worker 并用 Comlink 包装
-		const workerUrl = new URL('./ffi_worker.ts', import.meta.url).pathname
+		const tsPath = new URL('./ffi_worker.ts', import.meta.url).pathname
+		const jsPath = new URL('./ffi_worker.js', import.meta.url).pathname
+
+		// 先检查 .ts 文件是否存在，否则回落到 .js
+		const workerUrl = existsSync(tsPath) ? tsPath : jsPath
+
+		if (!existsSync(workerUrl)) {
+			// 如果什么都不干，它会静默退出难以调试
+			throw new Error(`Worker file not found: ${workerUrl}`)
+		}
+
 		this.worker = new Worker(workerUrl, { type: 'module' })
 		this.workerApi = wrap<GeofrontWorkerAPI>(this.worker)
 
