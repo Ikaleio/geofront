@@ -1,0 +1,15 @@
+name: 'Build Project'
+description: 'Builds the project for a specific platform'
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@v1
+    - name: Install dependencies
+      shell: bash
+      run: bun install
+    - name: Build project
+      shell: bash
+      run: bun run build
