@@ -1,0 +1,28 @@
+{
+	"name": "geofront-ts",
+	"version": "0.1.1",
+	"private": false,
+	"description": "A high-performance Minecraft proxy core built with Rust and Bun FFI.",
+	"main": "dist/src/geofront.js",
+	"types": "dist/src/geofront.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"test": "bun tests/test.ts",
+		"build": "bun run build.mjs"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"bun-types": "latest",
+		"cpr": "^3.0.1",
+		"socksv5": "^0.0.6"
+	},
+	"type": "module",
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"comlink": "^4.4.2"
+	}
+}

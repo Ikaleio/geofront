@@ -1,0 +1,21 @@
+[package]
+name = "geofront"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+governor = "0.10.0"
+lazy_static = "1.5.0"
+nonzero_ext = "0.3.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.46.1", features = ["rt", "macros", "rt-multi-thread", "time", "sync", "net", "io-util"] }
+tokio-socks = "0.5.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+url = "2.5.4"
+
+[lib]
+name = "geofront"
+crate-type = ["cdylib"]
