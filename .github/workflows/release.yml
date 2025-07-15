@@ -31,11 +31,15 @@ jobs:
       - name: Build project
         run: bun run build
 
-      - name: Upload artifact
+      - name: Upload native library
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
-          path: dist
+          name: lib-${{ matrix.os }}
+          path: |
+            dist/*.so
+            dist/*.dylib
+            dist/*.dll
+          if-no-files-found: error
 
   release:
     name: Create Release and Publish to NPM
@@ -50,21 +54,23 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v1
 
-      - name: Download all artifacts
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build project (JS and TS files)
+        run: bun run build
+
+      - name: Download all native libraries
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Combine artifacts
         run: |
-          mkdir -p dist/src
-          # Copy JS/TS files from one of the artifacts (e.g., linux)
-          cp -r artifacts/dist-ubuntu-latest/src/* dist/src/
-          # Copy native libraries from each artifact
-          cp artifacts/dist-ubuntu-latest/*.so dist/
-          cp artifacts/dist-macos-latest/*.dylib dist/
-          cp artifacts/dist-windows-latest/*.dll dist/
-          echo "Combined artifacts:"
+          cp artifacts/lib-ubuntu-latest/*.so dist/
+          cp artifacts/lib-macos-latest/*.dylib dist/
+          cp artifacts/lib-windows-latest/*.dll dist/
+          echo "Final dist directory contents:"
           ls -R dist
 
       - name: Set up Node.js for publishing

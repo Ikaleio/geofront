@@ -11,6 +11,7 @@
         "bun-types": "latest",
         "cpr": "^3.0.1",
         "socksv5": "^0.0.6",
+        "typescript": "^5",
       },
       "peerDependencies": {
         "typescript": "^5",

@@ -1,8 +1,7 @@
 import { execSync } from 'child_process';
-import { rmSync, mkdirSync } from 'fs';
+import { rmSync, mkdirSync, copyFileSync } from 'fs';
 import { platform } from 'os';
 import { join } from 'path';
-import cpr from 'cpr';
 
 console.log('Starting build process...');
 
@@ -46,28 +45,41 @@ const srcLibPath = join('target', 'release', libFileName);
 const destLibPath = join(distDir, libFileName);
 
 try {
-    cpr(srcLibPath, destLibPath, { overwrite: true }, (err) => {
-        if (err) {
-            throw err;
-        }
-        console.log(`Copied ${libFileName} to ${distDir}`);
-    });
+    copyFileSync(srcLibPath, destLibPath);
+    console.log(`Copied ${libFileName} to ${distDir}`);
 } catch (error) {
     console.error(`Failed to copy native library:`, error);
     process.exit(1);
 }
 
+// 4. Bundle TypeScript source files with Bun
+console.log('Bundling TypeScript files with Bun...');
+const result = await Bun.build({
+    entrypoints: ['src/geofront.ts', 'src/ffi_worker.ts'],
+    outdir: './dist',
+    target: 'bun',
+    splitting: false, // I don't like chunking
+    sourcemap: 'external',
+    minify: true,
+});
 
-// 4. Copy TypeScript source files
+if (!result.success) {
+    console.error('Bun build failed:');
+    for (const message of result.logs) {
+        console.error(message);
+    }
+    process.exit(1);
+}
+
+console.log('Bun build completed successfully!');
+
+// 5. Generate TypeScript declaration files
 try {
-    cpr('src', join(distDir, 'src'), { overwrite: true }, (err) => {
-        if (err) {
-            throw err;
-        }
-        console.log(`Copied src files to ${distDir}`);
-    });
+    console.log('Generating TypeScript declaration files...');
+    execSync('bunx tsc', { stdio: 'inherit' });
+    console.log('TypeScript declaration files generated successfully.');
 } catch (error) {
-    console.error('Failed to copy TypeScript files:', error);
+    console.error('Failed to generate TypeScript declaration files:', error);
     process.exit(1);
 }
 
