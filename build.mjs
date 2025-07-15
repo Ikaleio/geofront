@@ -27,17 +27,17 @@ try {
 }
 
 // 3. Copy native library
-const libName = 'libgeofront';
+const crateName = 'geofront';
 let libFileName;
 switch (platform()) {
     case 'darwin':
-        libFileName = `${libName}.dylib`;
+        libFileName = `lib${crateName}.dylib`;
         break;
     case 'win32':
-        libFileName = `${libName}.dll`;
+        libFileName = `${crateName}.dll`;
         break;
     default:
-        libFileName = `${libName}.so`;
+        libFileName = `lib${crateName}.so`;
         break;
 }
 
