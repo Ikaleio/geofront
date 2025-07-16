@@ -6,7 +6,7 @@
 
 **Geofront 是一个为 Minecraft 设计的高性能、可编程的入口代理核心，采用 Rust 编写，并通过 Bun FFI 与 TypeScript/JavaScript 无缝集成。**
 
-它就像一个网络世界的 `nginx`，允许你用单一的 IP 和端口，根据玩家连接时使用的服务器地址（`host`），将他们智能地路由到不同的后端 Minecraft 服务器。
+它就像一个用于 Minecraft 的 `nginx`，允许你用单一的 IP 和端口，根据玩家连接时使用的服务器地址（`host`），将他们智能地路由到不同的后端 Minecraft 服务器。
 
 ---
 
@@ -23,7 +23,7 @@
 ## 📦 安装
 
 ```bash
-bun install geofront
+bun install geofront-ts
 ```
 
 ## 🚀 快速上手
@@ -32,7 +32,7 @@ bun install geofront
 
 ```typescript
 // server.ts
-import { Geofront } from 'geofront'
+import { Geofront } from 'geofront-ts'
 
 const proxy = new Geofront()
 
@@ -74,6 +74,39 @@ console.log('Proxy is starting...')
 bun run server.ts
 ```
 
+更常见的用例是作为 Hypixel 代理（加速 IP 后端）：
+
+```typescript
+// server.ts
+import { Geofront } from 'geofront-ts'
+
+const proxy = new Geofront()
+
+// 设置路由规则
+proxy.setRouter((ip, host, player, protocol) => {
+	console.log(
+		`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
+	)
+
+	return {
+		remoteHost: 'mc.hypixel.net',
+		remotePort: 25565,
+		rewriteHost: 'mc.hypixel.net' // 该选项会重写重构握手包的 host 字段以绕过 Hypixel 的直连检测
+	}
+})
+
+// 启动监听
+proxy.listen('0.0.0.0', 25565).then(result => {
+	if (result.code === 0) {
+		console.log(`✅ Geofront proxy listening on 0.0.0.0:25565`)
+	} else {
+		console.error(`Failed to start listener, code: ${result.code}`)
+	}
+})
+
+console.log('Proxy is starting...')
+```
+
 ## 🛠️ 构建
 
 如果你想从源码构建：
@@ -81,7 +114,7 @@ bun run server.ts
 1.  确保你已经安装了 [Rust 工具链](https://rustup.rs/) 和 [Bun](https://bun.sh/)。
 2.  克隆仓库并安装依赖：
     ```bash
-    git clone https://github.com/<YOUR_GITHUB_USERNAME>/geofront.git
+    git clone https://github.com/Ikaleio/geofront.git
     cd geofront
     bun install
     ```
