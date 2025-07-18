@@ -11,8 +11,8 @@ const BACKEND_HOST = '127.0.0.1'
 const TEST_HOST = 'mc.example.com'
 const TEST_USERNAME_PREFIX = 'stress_test_'
 const TEST_PROTOCOL_VERSION = 47 // 1.8.9
-const DATA_SIZE = 100 * 1024 * 1024 // 1MB
-const CONCURRENT_CLIENTS = 10
+const DATA_SIZE = 1 * 1024 * 1024 // 1MB
+const CONCURRENT_CLIENTS = 100
 
 // ===== 协议工具函数 =====
 function writeVarInt(value: number): Buffer {

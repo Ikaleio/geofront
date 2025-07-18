@@ -34,18 +34,21 @@ class GeofrontWorkerAPI {
 		try {
 			// --- 动态加载 FFI 库 ---
 			let libPath: string
-			const libName = 'libgeofront'
-			const root = join(import.meta.dir, '..', 'dist') // 假设 'dist' 目录和 'package.json' 在同一级
+			const libName = 'geofront'
+			const isDev = process.env.NODE_ENV === 'development'
+			const rootDir = isDev
+				? join(import.meta.dir, '..', 'target', 'debug')
+				: join(import.meta.dir, '..', 'dist')
 
 			switch (platform()) {
 				case 'darwin':
-					libPath = join(root, `${libName}.dylib`)
+					libPath = join(rootDir, `lib${libName}.dylib`)
 					break
 				case 'win32':
-					libPath = join(root, `${libName}.dll`)
+					libPath = join(rootDir, `${libName}.dll`)
 					break
 				default:
-					libPath = join(root, `${libName}.so`)
+					libPath = join(rootDir, `lib${libName}.so`)
 					break
 			}
 
