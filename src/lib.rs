@@ -388,6 +388,25 @@ pub extern "C" fn proxy_shutdown() -> ProxyError {
     PROXY_OK
 }
 
+/// Disconnect all active connections and returns the number of connections kicked.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_kick_all() -> c_uint {
+    let mut conn_manager = CONN_MANAGER.lock().unwrap();
+    let mut rate_limiters = RATE_LIMITERS.lock().unwrap();
+    let mut conn_metrics = CONN_METRICS.lock().unwrap();
+
+    let kicked_count = conn_manager.connections.len();
+
+    for (conn_id, handle) in conn_manager.connections.drain() {
+        handle.abort();
+        rate_limiters.remove(&conn_id);
+        conn_metrics.remove(&conn_id);
+        ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    kicked_count as c_uint
+}
+
 /// Takes a snapshot of all metrics and returns it as a JSON string.
 /// The caller is responsible for freeing the returned string using `proxy_free_string`.
 #[unsafe(no_mangle)]
@@ -420,6 +439,28 @@ pub extern "C" fn proxy_get_metrics() -> *const c_char {
             Err(_) => ptr::null(),
         },
         Err(_) => ptr::null(),
+    }
+}
+
+/// Takes a snapshot of a single connection's metrics and returns it as a JSON string.
+/// The caller is responsible for freeing the returned string using `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_get_connection_metrics(conn_id: ProxyConnection) -> *const c_char {
+    let conn_metrics_guard = CONN_METRICS.lock().unwrap();
+    if let Some(metrics) = conn_metrics_guard.get(&conn_id) {
+        let snapshot = ConnMetricsSnapshot {
+            bytes_sent: metrics.bytes_sent.load(Ordering::SeqCst),
+            bytes_recv: metrics.bytes_recv.load(Ordering::SeqCst),
+        };
+        match serde_json::to_string(&snapshot) {
+            Ok(json_str) => match CString::new(json_str) {
+                Ok(c_str) => c_str.into_raw(),
+                Err(_) => ptr::null(),
+            },
+            Err(_) => ptr::null(),
+        }
+    } else {
+        ptr::null()
     }
 }
 

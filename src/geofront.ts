@@ -71,28 +71,34 @@ interface GeofrontWorkerAPI {
 
 export class Connection {
 	private workerApi: Remote<GeofrontWorkerAPI>
-	private connId: bigint
+	private _id: number
 	public when: number
-	public metrics: ConnectionMetrics
 
 	constructor(
 		workerApi: Remote<GeofrontWorkerAPI>,
-		connId: bigint,
+		connId: number,
 		when: number
 	) {
 		this.workerApi = workerApi
-		this.connId = connId
+		this._id = connId
 		this.when = when
-		this.metrics = { bytes_sent: 0, bytes_recv: 0 }
+	}
+
+	get id(): number {
+		return this._id
+	}
+
+	get metrics(): Promise<ConnectionMetrics> {
+		return this.workerApi.getConnectionMetrics(this._id)
 	}
 
 	async limit(avg: number, burst?: number) {
 		const burstVal = burst || avg
-		return this.workerApi.setRateLimit(Number(this.connId), avg, burstVal)
+		return this.workerApi.setRateLimit(this._id, avg, burstVal)
 	}
 
 	async kick() {
-		return this.workerApi.disconnect(Number(this.connId))
+		return this.workerApi.disconnect(this._id)
 	}
 }
 
@@ -106,7 +112,7 @@ export class Geofront {
 		protocol: number
 	) => RouterResult
 	private listenerId?: number
-	private connectionMap = new Map<bigint, Connection>()
+	private connectionMap = new Map<number, Connection>()
 	public metrics: GlobalMetrics
 
 	constructor() {
@@ -138,8 +144,8 @@ export class Geofront {
 
 			// Only create a connection object if the decision is NOT to disconnect
 			if (!('disconnect' in result)) {
-				const conn = new Connection(this.workerApi, connId, Date.now())
-				this.connectionMap.set(connId, conn)
+				const conn = new Connection(this.workerApi, Number(connId), Date.now())
+				this.connectionMap.set(Number(connId), conn)
 			}
 		}
 		return result
@@ -203,26 +209,20 @@ export class Geofront {
 		await this.updateMetrics()
 	}
 
-	async connections(): Promise<Connection[]> {
+	async *connections(): AsyncGenerator<Connection> {
 		const result = await this.workerApi.getConnections()
-		const connections = []
 
 		for (const connId of result.connections) {
-			if (!this.connectionMap.has(BigInt(connId))) {
-				const conn = new Connection(this.workerApi, BigInt(connId), Date.now())
-				this.connectionMap.set(BigInt(connId), conn)
+			if (!this.connectionMap.has(connId)) {
+				const conn = new Connection(this.workerApi, connId, Date.now())
+				this.connectionMap.set(connId, conn)
 			}
-			const conn = this.connectionMap.get(BigInt(connId))!
-			try {
-				conn.metrics = await this.workerApi.getConnectionMetrics(connId)
-			} catch (error) {
-				throw new Error(
-					`Failed to get metrics for connection ${connId}: ${error}`
-				)
-			}
-			connections.push(conn)
+			yield this.connectionMap.get(connId)!
 		}
-		return connections
+	}
+
+	connection(id: number): Connection | undefined {
+		return this.connectionMap.get(id)
 	}
 
 	async shutdown() {

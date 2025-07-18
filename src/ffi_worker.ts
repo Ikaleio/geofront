@@ -72,8 +72,13 @@ class GeofrontWorkerAPI {
 					returns: FFIType.i32
 				},
 				proxy_shutdown: { args: [], returns: FFIType.i32 },
+				proxy_kick_all: { args: [], returns: FFIType.u32 },
 				proxy_get_metrics: {
 					args: [],
+					returns: FFIType.pointer
+				},
+				proxy_get_connection_metrics: {
+					args: [FFIType.u64],
 					returns: FFIType.pointer
 				},
 				proxy_free_string: {
@@ -239,19 +244,28 @@ class GeofrontWorkerAPI {
 		return { connections: Array.from(activeConnections).map(id => Number(id)) }
 	}
 
-	getConnectionMetrics(connectionId: number) {
-		// 注意：此功能需要 Rust 端实现
-		// 目前返回一个模拟的响应
-		return { bytes_sent: 0, bytes_recv: 0 }
+	async getConnectionMetrics(connectionId: number) {
+		let metricsPtr
+		try {
+			metricsPtr = symbols.proxy_get_connection_metrics(BigInt(connectionId))
+			if (metricsPtr === 0) {
+				return null
+			}
+			const metricsJson = new CString(metricsPtr)
+			return JSON.parse(metricsJson.toString())
+		} catch (e) {
+			return null
+		} finally {
+			if (metricsPtr !== 0) {
+				symbols.proxy_free_string(metricsPtr)
+			}
+		}
 	}
 
 	async kickAll() {
-		const promises = Array.from(activeConnections).map(connId =>
-			this.disconnect(Number(connId))
-		)
-		await Promise.all(promises)
+		const kickedCount = symbols.proxy_kick_all()
 		activeConnections.clear()
-		return promises.length
+		return kickedCount
 	}
 
 	clearRouteCache() {
