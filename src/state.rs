@@ -1,0 +1,53 @@
+//! geofront/src/state.rs
+//! Global state management.
+
+use crate::types::{
+    ConnMetrics, ConnectionManager, ListenerState, ProxyConnection, ProxyRouterFn, RouteDecision,
+};
+use governor::{
+    RateLimiter,
+    clock::DefaultClock,
+    state::{InMemoryState, direct::NotKeyed},
+};
+use lazy_static::lazy_static;
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicU64},
+};
+use tokio::sync::{Mutex, oneshot};
+use tracing_subscriber::{filter::EnvFilter, reload::Handle as ReloadHandle};
+
+// Global metrics counters
+pub static TOTAL_CONN: AtomicU64 = AtomicU64::new(0);
+pub static ACTIVE_CONN: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_BYTES_RECV: AtomicU64 = AtomicU64::new(0);
+
+lazy_static! {
+    pub static ref CONN_METRICS: std::sync::Mutex<HashMap<ProxyConnection, Arc<ConnMetrics>>> =
+        std::sync::Mutex::new(HashMap::new());
+    // Map to hold the senders for pending routing decisions
+    pub static ref PENDING_ROUTES: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<RouteDecision>>> =
+        std::sync::Mutex::new(HashMap::new());
+    pub static ref LISTENER_STATE: Arc<std::sync::Mutex<ListenerState>> =
+        Arc::new(std::sync::Mutex::new(ListenerState::new()));
+    pub static ref CONN_MANAGER: Arc<std::sync::Mutex<ConnectionManager>> =
+        Arc::new(std::sync::Mutex::new(ConnectionManager::new()));
+    pub static ref RATE_LIMITERS: std::sync::Mutex<
+        HashMap<
+            ProxyConnection,
+            (
+                Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+                Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+            ),
+        >,
+    > = std::sync::Mutex::new(HashMap::new());
+    pub static ref LISTENER_COUNTER: AtomicU64 = AtomicU64::new(1);
+    pub static ref CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
+    pub static ref RELOAD_HANDLE: std::sync::Mutex<Option<ReloadHandle<EnvFilter, tracing_subscriber::Registry>>> =
+        std::sync::Mutex::new(None);
+    pub static ref ROUTER_CALLBACK: std::sync::Mutex<Option<ProxyRouterFn>> =
+        std::sync::Mutex::new(None);
+    // This lock serializes all FFI calls to the router to prevent concurrency issues.
+    pub static ref FFI_ROUTER_LOCK: Mutex<()> = Mutex::new(());
+}

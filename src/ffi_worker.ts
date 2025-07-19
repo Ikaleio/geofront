@@ -68,7 +68,13 @@ class GeofrontWorkerAPI {
 				proxy_stop_listener: { args: [FFIType.u64], returns: FFIType.i32 },
 				proxy_disconnect: { args: [FFIType.u64], returns: FFIType.i32 },
 				proxy_set_rate_limit: {
-					args: [FFIType.u64, FFIType.u64, FFIType.u64],
+					args: [
+						FFIType.u64, // connId
+						FFIType.u64, // send_avg_bps
+						FFIType.u64, // send_burst_bps
+						FFIType.u64, // recv_avg_bps
+						FFIType.u64 // recv_burst_bps
+					],
 					returns: FFIType.i32
 				},
 				proxy_shutdown: { args: [], returns: FFIType.i32 },
@@ -208,11 +214,19 @@ class GeofrontWorkerAPI {
 		return symbols.proxy_disconnect(BigInt(connectionId))
 	}
 
-	async setRateLimit(connectionId: number, sendBps: number, recvBps: number) {
+	async setRateLimit(
+		connectionId: number,
+		sendAvg: number,
+		sendBurst: number,
+		recvAvg: number,
+		recvBurst: number
+	) {
 		return symbols.proxy_set_rate_limit(
 			BigInt(connectionId),
-			BigInt(sendBps),
-			BigInt(recvBps)
+			BigInt(sendAvg),
+			BigInt(sendBurst),
+			BigInt(recvAvg),
+			BigInt(recvBurst)
 		)
 	}
 

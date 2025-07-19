@@ -1,7 +1,7 @@
 // 主线程 API：通过 Comlink 与 Worker 通信
 import { wrap, proxy } from 'comlink'
 import type { Remote } from 'comlink'
-import { CString, type Pointer } from 'bun:ffi'
+import { z } from 'zod'
 
 export interface RouteEvent {
 	connId: bigint
@@ -29,6 +29,17 @@ export interface ConnectionMetrics {
 	bytes_recv: number
 }
 
+const limitSchema = z
+	.object({
+		sendAvg: z.number().min(0).default(0),
+		sendBurst: z.number().min(0).optional(),
+		recvAvg: z.number().min(0).default(0),
+		recvBurst: z.number().min(0).optional()
+	})
+	.partial()
+
+export type LimitOpts = z.infer<typeof limitSchema>
+
 export interface GlobalMetrics {
 	total_conn: number
 	active_conn: number
@@ -47,8 +58,10 @@ interface GeofrontWorkerAPI {
 	disconnect(connectionId: number): Promise<number>
 	setRateLimit(
 		connectionId: number,
-		sendBps: number,
-		recvBps: number
+		sendAvg: number,
+		sendBurst: number,
+		recvAvg: number,
+		recvBurst: number
 	): Promise<number>
 	getMetrics(): Promise<GlobalMetrics>
 	getConnections(): Promise<{ connections: number[] }>
@@ -92,9 +105,15 @@ export class Connection {
 		return this.workerApi.getConnectionMetrics(this._id)
 	}
 
-	async limit(avg: number, burst?: number) {
-		const burstVal = burst || avg
-		return this.workerApi.setRateLimit(this._id, avg, burstVal)
+	async limit(opts: LimitOpts) {
+		const parsed = limitSchema.parse(opts)
+		return this.workerApi.setRateLimit(
+			this._id,
+			parsed.sendAvg ?? 0,
+			parsed.sendBurst ?? parsed.sendAvg ?? 0,
+			parsed.recvAvg ?? 0,
+			parsed.recvBurst ?? parsed.recvAvg ?? 0
+		)
 	}
 
 	async kick() {
@@ -113,6 +132,7 @@ export class Geofront {
 	) => RouterResult
 	private listenerId?: number
 	private connectionMap = new Map<number, Connection>()
+	private globalLimit: LimitOpts = {}
 	public metrics: GlobalMetrics
 
 	constructor() {
@@ -146,6 +166,10 @@ export class Geofront {
 			if (!('disconnect' in result)) {
 				const conn = new Connection(this.workerApi, Number(connId), Date.now())
 				this.connectionMap.set(Number(connId), conn)
+				// Apply global limit to new connection
+				if (Object.keys(this.globalLimit).length > 0) {
+					conn.limit(this.globalLimit)
+				}
 			}
 		}
 		return result
@@ -194,11 +218,22 @@ export class Geofront {
 		this.workerApi.setRouterCallback(proxyCallback as any)
 	}
 
-	async limit(avg: number, burst?: number) {
+	async limit(opts: LimitOpts) {
+		const parsed = limitSchema.parse(opts)
+		this.globalLimit = parsed
+
 		const connections = await this.workerApi.getConnections()
 		const promises = []
 		for (const connId of connections.connections) {
-			promises.push(this.workerApi.setRateLimit(connId, avg, burst || avg))
+			promises.push(
+				this.workerApi.setRateLimit(
+					connId,
+					parsed.sendAvg ?? 0,
+					parsed.sendBurst ?? parsed.sendAvg ?? 0,
+					parsed.recvAvg ?? 0,
+					parsed.recvBurst ?? parsed.recvAvg ?? 0
+				)
+			)
 		}
 		await Promise.all(promises)
 	}

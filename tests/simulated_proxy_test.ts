@@ -104,6 +104,7 @@ function startBackendServer(): Promise<{
 				let receivedData = Buffer.alloc(0)
 				let state = 'HANDSHAKE'
 				let receivedDownstreamBytes = 0
+				let transferStartTime = 0
 				const serverUploadData = randomBytes(DATA_SIZE)
 
 				socket.on('data', data => {
@@ -170,6 +171,7 @@ function startBackendServer(): Promise<{
 							console.log(
 								`[Backend] 开始接收 ${DATA_SIZE / 1024 / 1024}MB 下行数据...`
 							)
+							transferStartTime = Date.now()
 						}
 
 						if (state === 'TRANSFER') {
@@ -179,8 +181,13 @@ function startBackendServer(): Promise<{
 							}
 
 							if (receivedDownstreamBytes >= DATA_SIZE) {
+								const duration = (Date.now() - transferStartTime) / 1000
+								const speed =
+									(receivedDownstreamBytes / duration / 1024 / 1024) * 8
 								console.log(
-									`[Backend] ✓ 下行数据接收完毕 (${receivedDownstreamBytes} 字节)`
+									`[Backend] ✓ 下行数据接收完毕 (${receivedDownstreamBytes} 字节, ${duration.toFixed(
+										2
+									)}s, ${speed.toFixed(2)} Mbps)`
 								)
 								assert.equal(
 									receivedDownstreamBytes,
@@ -233,6 +240,7 @@ function runClientTest(): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const clientUploadData = randomBytes(DATA_SIZE)
 		let receivedUpstreamBytes = 0
+		let transferStartTime = 0
 		let state = 'LOGIN'
 		let receivedData = Buffer.alloc(0)
 
@@ -281,14 +289,21 @@ function runClientTest(): Promise<void> {
 
 				if (state === 'TRANSFER' && receivedData.length > 0) {
 					receivedUpstreamBytes += receivedData.length
+					if (transferStartTime === 0) {
+						transferStartTime = Date.now()
+					}
 					console.log(
 						`[Client] 收到上行数据: ${receivedData.length} 字节 (总计: ${receivedUpstreamBytes})`
 					)
 					receivedData = Buffer.alloc(0)
 
 					if (receivedUpstreamBytes >= DATA_SIZE) {
+						const duration = (Date.now() - transferStartTime) / 1000
+						const speed = (receivedUpstreamBytes / duration / 1024 / 1024) * 8
 						console.log(
-							`[Client] ✓ 上行数据接收完毕 (${receivedUpstreamBytes} 字节)`
+							`[Client] ✓ 上行数据接收完毕 (${receivedUpstreamBytes} 字节, ${duration.toFixed(
+								2
+							)}s, ${speed.toFixed(2)} Mbps)`
 						)
 						assert.equal(receivedUpstreamBytes, DATA_SIZE, '上行数据大小不匹配')
 						client.end()
@@ -340,8 +355,13 @@ async function main() {
 		await geofront.listen('0.0.0.0', PROXY_PORT)
 		console.log(`[Geofront] ✓ 代理监听器已启动在端口 ${PROXY_PORT}`)
 
-		// 4. 设置全局速率限制 (可选)
-		await geofront.limit(1000000) // 1MB/s
+		// // 4. 设置全局速率限制 (可选)
+		// await geofront.limit({
+		// 	sendAvg: 1024 * 1024, // 1 MiB/s
+		// 	sendBurst: 1024 * 1024, // 1 MiB burst
+		// 	recvAvg: 1024 * 1024, // 1 MiB/s
+		// 	recvBurst: 1024 * 1024 // 1 MiB burst
+		// }) // 1MB/s
 		console.log('[Geofront] ✓ 全局速率限制已设置')
 
 		// 5. 显示初始统计信息
@@ -370,13 +390,11 @@ async function main() {
 		console.log(`  - 总接收字节: ${geofront.metrics.total_bytes_recv}`)
 
 		// 10. 测试连接管理
-		const connections = await geofront.connections()
-		console.log(`\n[Geofront] 当前连接数: ${connections.length}`)
-		for (const conn of connections) {
+		for await (const conn of geofront.connections()) {
 			console.log(
-				`  - 连接 ${new Date(conn.when).toLocaleString()}: 发送 ${
-					conn.metrics.bytes_sent
-				} 字节, 接收 ${conn.metrics.bytes_recv} 字节`
+				`  - 连接 ${new Date(
+					conn.when
+				).toLocaleString()}: ${await conn.metrics}`
 			)
 		}
 

@@ -24,6 +24,7 @@
 		"typescript": "^5"
 	},
 	"dependencies": {
-		"comlink": "^4.4.2"
+		"comlink": "^4.4.2",
+		"zod": "^4.0.5"
 	}
 }
