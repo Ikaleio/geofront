@@ -4,10 +4,13 @@
 use crate::{
     protocol::{self, write_disconnect},
     state::{
-        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, FFI_ROUTER_LOCK, OPTIONS, PENDING_ROUTES,
-        RATE_LIMITERS, ROUTER_CALLBACK, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
+        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, FFI_MOTD_LOCK, FFI_ROUTER_LOCK, MOTD_CALLBACK,
+        OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, ROUTER_CALLBACK, TOTAL_BYTES_RECV,
+        TOTAL_BYTES_SENT,
     },
-    types::{AsyncStream, HandshakeData, ProxyConnection, ProxyProtocolIn, RouteDecision},
+    types::{
+        AsyncStream, HandshakeData, MotdDecision, ProxyConnection, ProxyProtocolIn, RouteDecision,
+    },
 };
 use ppp::PartialResult;
 use std::{ffi::CString, net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
@@ -152,8 +155,8 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
         }
     }
 
-    // Parse handshake & login
-    let mut hs = match protocol::parse_handshake(&mut inbound).await {
+    // Parse handshake & determine next action based on state
+    let hs = match protocol::parse_handshake(&mut inbound).await {
         Ok(h) => h,
         Err(e) => {
             error!(conn = conn_id, "Handshake failed: {}", e);
@@ -161,6 +164,21 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
             return;
         }
     };
+
+    // Check if this is a status request (MOTD) or login request
+    if hs.next_state == 1 {
+        // Status request - handle MOTD
+        handle_status_request(conn_id, &mut inbound, &hs, peer_addr_override).await;
+        cleanup_conn(conn_id);
+        return;
+    } else if hs.next_state != 2 {
+        // Unknown state
+        error!(conn = conn_id, "Unknown next_state: {}", hs.next_state);
+        cleanup_conn(conn_id);
+        return;
+    }
+
+    // Continue with login flow (state 2)
     let username = match protocol::parse_login_start(&mut inbound).await {
         Ok(u) => u,
         Err(e) => {
@@ -198,13 +216,14 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     }
 
     // Rewrite host if specified
+    let mut hs_for_rewrite = hs.clone(); // Clone for potential modification
     if let Some(new_host) = route_decision.rewrite_host {
         info!(conn = conn_id, old_host = %hs.host, new_host = %new_host, "Rewriting host");
-        hs.host = new_host;
+        hs_for_rewrite.host = new_host;
     }
 
     // Re-serialize the packets to be forwarded, using the potentially modified handshake.
-    let handshake_packet = create_handshake_packet(&hs);
+    let handshake_packet = create_handshake_packet(&hs_for_rewrite);
     let login_packet = create_login_start_packet(&username);
 
     // Establish outbound connection
@@ -549,4 +568,245 @@ fn create_login_start_packet(username: &str) -> Vec<u8> {
     let mut packet = write_varint(data.len() as i32);
     packet.extend(data);
     packet
+}
+
+/// Handle status request (MOTD)
+async fn handle_status_request(
+    conn_id: ProxyConnection,
+    inbound: &mut TcpStream,
+    hs: &HandshakeData,
+    peer_addr_override: Option<SocketAddr>,
+) {
+    // First, read the status request packet (should be packet ID 0x00 with no data)
+    match protocol::read_varint(inbound).await {
+        Ok(_packet_len) => {
+            match protocol::read_varint(inbound).await {
+                Ok(packet_id) if packet_id == 0 => {
+                    // Valid status request, proceed with MOTD handling
+                }
+                Ok(id) => {
+                    error!(conn = conn_id, "Invalid status request packet ID: {}", id);
+                    return;
+                }
+                Err(e) => {
+                    error!(
+                        conn = conn_id,
+                        "Failed to read status request packet ID: {}", e
+                    );
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            error!(
+                conn = conn_id,
+                "Failed to read status request packet length: {}", e
+            );
+            return;
+        }
+    }
+
+    let peer_ip = peer_addr_override
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| {
+            inbound
+                .peer_addr()
+                .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string())
+        });
+
+    // Get MOTD decision from callback
+    let motd_decision = match get_motd_info(conn_id, hs, &peer_ip).await {
+        Ok(decision) => decision,
+        Err(_) => {
+            // Error already logged, send default MOTD or disconnect
+            error!(conn = conn_id, "Failed to get MOTD decision, using default");
+            MotdDecision {
+                version: Some(crate::types::MotdVersion {
+                    name: "Geofront".to_string(),
+                    protocol: hs.protocol_version,
+                }),
+                players: Some(crate::types::MotdPlayers {
+                    max: 20,
+                    online: 0,
+                    sample: vec![],
+                }),
+                description: Some(serde_json::json!({
+                    "text": "Geofront Proxy - Connection Error"
+                })),
+                favicon: None,
+                disconnect: None,
+            }
+        }
+    };
+
+    // Check if we should disconnect
+    if let Some(disconnect_msg) = motd_decision.disconnect {
+        let _ = write_disconnect(inbound, &disconnect_msg).await;
+        return;
+    }
+
+    // Build and send status response
+    if let Err(e) = send_status_response(inbound, &motd_decision, hs.protocol_version).await {
+        error!(conn = conn_id, "Failed to send status response: {}", e);
+        return;
+    }
+
+    // Handle ping request (if client sends one)
+    if let Ok(_packet_len) = protocol::read_varint(inbound).await {
+        if let Ok(packet_id) = protocol::read_varint(inbound).await {
+            if packet_id == 1 {
+                // Ping packet - read the payload and echo it back
+                if let Ok(payload) = inbound.read_u64().await {
+                    let response = create_ping_response(payload);
+                    let _ = inbound.write_all(&response).await;
+                }
+            }
+        }
+    }
+}
+
+/// Send status response packet with MOTD data
+async fn send_status_response(
+    stream: &mut TcpStream,
+    motd_decision: &MotdDecision,
+    protocol_version: i32,
+) -> std::io::Result<()> {
+    // Build JSON response
+    let mut response_json = serde_json::json!({
+        "version": {
+            "name": motd_decision.version.as_ref()
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| "Geofront".to_string()),
+            "protocol": motd_decision.version.as_ref()
+                .map(|v| v.protocol)
+                .unwrap_or(protocol_version)
+        },
+        "players": {
+            "max": motd_decision.players.as_ref()
+                .map(|p| p.max)
+                .unwrap_or(20),
+            "online": motd_decision.players.as_ref()
+                .map(|p| p.online)
+                .unwrap_or(0),
+            "sample": motd_decision.players.as_ref()
+                .map(|p| &p.sample)
+                .unwrap_or(&vec![])
+        },
+        "description": motd_decision.description.clone()
+            .unwrap_or_else(|| serde_json::json!({
+                "text": "Geofront Proxy"
+            }))
+    });
+
+    // Add favicon if present
+    if let Some(ref favicon) = motd_decision.favicon {
+        response_json["favicon"] = serde_json::json!(favicon);
+    }
+
+    // Serialize to JSON string
+    let json_str = serde_json::to_string(&response_json).unwrap_or_else(|_| {
+        r#"{"version":{"name":"Geofront","protocol":47},"players":{"max":20,"online":0,"sample":[]},"description":{"text":"Geofront Proxy - JSON Error"}}"#.to_string()
+    });
+
+    // Build status response packet
+    let mut payload = Vec::new();
+    payload.extend(write_varint(0x00)); // Status Response packet ID
+    payload.extend(write_string(&json_str));
+
+    let mut packet = write_varint(payload.len() as i32);
+    packet.extend(payload);
+
+    stream.write_all(&packet).await
+}
+
+/// Create ping response packet
+fn create_ping_response(payload: u64) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend(write_varint(0x01)); // Pong packet ID
+    data.extend(&payload.to_be_bytes());
+
+    let mut packet = write_varint(data.len() as i32);
+    packet.extend(data);
+    packet
+}
+
+/// Asynchronously requests MOTD information via FFI and waits for the decision.
+async fn get_motd_info(
+    conn_id: ProxyConnection,
+    hs: &HandshakeData,
+    peer_ip: &str,
+) -> Result<MotdDecision, ()> {
+    // Acquire the lock to ensure only one FFI MOTD operation happens at a time.
+    let _guard = FFI_MOTD_LOCK.lock().await;
+
+    let (tx, rx) = oneshot::channel();
+
+    // Store the sender so the FFI callback can use it
+    PENDING_MOTDS.lock().unwrap().insert(conn_id, tx);
+
+    // This part is now synchronous: it just calls the FFI function and returns.
+    // The actual result will arrive on the `rx` channel.
+    request_motd_info(conn_id, hs, peer_ip);
+
+    // Asynchronously wait for the decision to be submitted.
+    // Add a timeout to prevent waiting forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(decision)) => Ok(decision),
+        Ok(Err(_)) => {
+            error!(conn = conn_id, "MOTD decision channel closed unexpectedly.");
+            Err(())
+        }
+        Err(_) => {
+            error!(conn = conn_id, "Timed out waiting for MOTD decision.");
+            // Clean up the pending MOTD entry
+            PENDING_MOTDS.lock().unwrap().remove(&conn_id);
+            Err(())
+        }
+    }
+}
+
+/// Fires off the FFI call to JS to request an MOTD decision.
+/// This function is synchronous and does not wait for a response.
+fn request_motd_info(conn_id: ProxyConnection, hs: &HandshakeData, peer_ip: &str) {
+    let cb = match *MOTD_CALLBACK.lock().unwrap() {
+        Some(cb) => cb,
+        None => {
+            error!("MOTD callback is not registered, using default MOTD.");
+            // If no callback, we can immediately send a default MOTD decision.
+            if let Some(sender) = PENDING_MOTDS.lock().unwrap().remove(&conn_id) {
+                let _ = sender.send(MotdDecision {
+                    version: Some(crate::types::MotdVersion {
+                        name: "Geofront".to_string(),
+                        protocol: hs.protocol_version,
+                    }),
+                    players: Some(crate::types::MotdPlayers {
+                        max: 20,
+                        online: 0,
+                        sample: vec![],
+                    }),
+                    description: Some(serde_json::json!({
+                        "text": "Geofront Proxy - No MOTD callback configured"
+                    })),
+                    favicon: None,
+                    disconnect: None,
+                });
+            }
+            return;
+        }
+    };
+
+    // These CStrings are now owned by this function and will be freed
+    // by JS using `proxy_free_string`.
+    let peer_ip_ptr = CString::new(peer_ip).unwrap().into_raw();
+    let host_ptr = CString::new(hs.host.clone()).unwrap().into_raw();
+    let username_ptr = CString::new("").unwrap().into_raw(); // Empty username for status requests
+
+    cb(
+        conn_id,
+        peer_ip_ptr,
+        hs.port,
+        hs.protocol_version as u32,
+        host_ptr,
+        username_ptr,
+    );
 }

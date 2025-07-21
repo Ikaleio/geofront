@@ -15,10 +15,23 @@ export type RouteCallback = (
 	user: string
 ) => Promise<any> // The handler now returns a promise of the JSON object
 
+// MOTD 回调类型 - 参数与路由回调一致
+export type MotdCallback = (
+	connId: bigint,
+	peerIp: string,
+	port: number,
+	protocol: number,
+	host: string,
+	user: string
+) => Promise<any> // The handler now returns a promise of the MOTD object
+
 let symbols: any = null
 
 // 路由回调处理器
 let asyncRouteCallbackHandler: RouteCallback | null = null
+
+// MOTD 回调处理器
+let asyncMotdCallbackHandler: MotdCallback | null = null
 
 // 存储连接 ID
 const activeConnections = new Set<bigint>()
@@ -68,6 +81,14 @@ class GeofrontWorkerAPI {
 					returns: FFIType.i32
 				},
 				proxy_submit_routing_decision: {
+					args: [FFIType.u64, FFIType.cstring],
+					returns: FFIType.i32
+				},
+				proxy_register_motd: {
+					args: [FFIType.function],
+					returns: FFIType.i32
+				},
+				proxy_submit_motd_decision: {
 					args: [FFIType.u64, FFIType.cstring],
 					returns: FFIType.i32
 				},
@@ -189,6 +210,93 @@ class GeofrontWorkerAPI {
 			// 注册路由回调
 			symbols.proxy_register_router(routerCallback)
 
+			// JSCallback for MOTD
+			const motdCallback = new JSCallback(
+				(
+					connId: bigint,
+					peerIpPtr: Pointer,
+					port: number,
+					protocol: number,
+					hostPtr: Pointer,
+					userPtr: Pointer
+				) => {
+					// This callback is now fully async.
+					// It doesn't return anything to Rust directly.
+					// It will call another FFI function to submit the result.
+					;(async () => {
+						// Decode strings immediately
+						const peerIp = new CString(peerIpPtr).toString()
+						const host = new CString(hostPtr).toString()
+						const user = new CString(userPtr).toString()
+
+						// Free the strings Rust allocated for us
+						symbols.proxy_free_string(peerIpPtr)
+						symbols.proxy_free_string(hostPtr)
+						symbols.proxy_free_string(userPtr)
+
+						if (!asyncMotdCallbackHandler) {
+							const errResult = JSON.stringify({
+								version: { name: 'Geofront', protocol: protocol },
+								players: { max: 20, online: 0, sample: [] },
+								description: {
+									text: 'Geofront Proxy - No MOTD callback configured'
+								},
+								favicon: null
+							})
+							symbols.proxy_submit_motd_decision(
+								connId,
+								Buffer.from(errResult + '\0')
+							)
+							return
+						}
+
+						try {
+							// Get MOTD decision object from the main thread
+							const result = await asyncMotdCallbackHandler(
+								connId,
+								peerIp,
+								port,
+								protocol,
+								host,
+								user
+							)
+
+							// Serialize result to JSON
+							const jsonResult = JSON.stringify(result)
+
+							// Submit decision back to Rust
+							symbols.proxy_submit_motd_decision(
+								connId,
+								Buffer.from(jsonResult + '\0')
+							)
+						} catch (e) {
+							const errResult = JSON.stringify({
+								disconnect: 'Internal MOTD error'
+							})
+							symbols.proxy_submit_motd_decision(
+								connId,
+								Buffer.from(errResult + '\0')
+							)
+						}
+					})()
+				},
+				{
+					args: [
+						FFIType.u64, // connId
+						FFIType.ptr, // peerIp
+						FFIType.u16, // port
+						FFIType.u32, // protocol
+						FFIType.ptr, // host
+						FFIType.ptr // user
+					],
+					returns: FFIType.void,
+					threadsafe: true
+				}
+			)
+
+			// 注册 MOTD 回调
+			symbols.proxy_register_motd(motdCallback)
+
 			this.initialized = true
 			return { ok: true }
 		} catch (e) {
@@ -202,6 +310,14 @@ class GeofrontWorkerAPI {
 
 	removeRouteCallback() {
 		asyncRouteCallbackHandler = null
+	}
+
+	async setMotdCallback(cb: MotdCallback) {
+		asyncMotdCallbackHandler = cb
+	}
+
+	removeMotdCallback() {
+		asyncMotdCallbackHandler = null
 	}
 
 	async startListener(addr: string, port: number) {

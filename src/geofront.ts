@@ -2,6 +2,8 @@
 import { wrap, proxy, releaseProxy } from 'comlink'
 import type { Remote } from 'comlink'
 import { z } from 'zod'
+import type { MotdResult, MotdType } from './motd'
+import { MotdSchema, buildMotd } from './motd'
 
 export interface RouteEvent {
 	connId: bigint
@@ -90,6 +92,17 @@ interface GeofrontWorkerAPI {
 		) => Promise<RouterResult> // Returns the result object
 	): void
 	removeRouteCallback(): void
+	setMotdCallback(
+		callback: (
+			connId: bigint,
+			peerIp: string,
+			port: number,
+			protocol: number,
+			host: string,
+			user: string // For MOTD requests, this will be empty string ""
+		) => Promise<any> // Returns the MOTD object
+	): void
+	removeMotdCallback(): void
 	clearRouteCache(): void
 }
 
@@ -141,6 +154,11 @@ export class Geofront {
 		player: string,
 		protocol: number
 	) => RouterResult
+	private motdCallback?: (
+		ip: string,
+		host: string,
+		protocol: number
+	) => MotdResult
 	private listenerId?: number
 	private connectionMap = new Map<number, Connection>()
 	private globalLimit: LimitOpts = {}
@@ -200,6 +218,30 @@ export class Geofront {
 		return result
 	}
 
+	private async handleMotd(
+		connId: bigint,
+		peerIp: string,
+		protocol: number,
+		host: string,
+		user: string
+	): Promise<MotdResult> {
+		let result: MotdResult
+		if (!this.motdCallback) {
+			// Default MOTD when no callback is configured
+			const defaultMotd: MotdType = {
+				version: { name: 'Geofront', protocol: protocol },
+				players: { max: 20, online: 0, sample: [] },
+				description: { text: 'Geofront Proxy - No MOTD callback configured' },
+				favicon:
+					'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+			}
+			result = buildMotd(defaultMotd, 0, protocol)
+		} else {
+			result = this.motdCallback(peerIp, host, protocol)
+		}
+		return result
+	}
+
 	async listen(host: string, port: number) {
 		if (!this.initialized) {
 			throw new Error('Geofront worker is not initialized')
@@ -249,6 +291,31 @@ export class Geofront {
 		)
 
 		this.workerApi.setRouterCallback(proxyCallback as any)
+	}
+
+	setMotdCallback(
+		callback: (ip: string, host: string, protocol: number) => MotdResult
+	) {
+		if (!this.initialized) {
+			throw new Error('Geofront worker is not initialized')
+		}
+		this.motdCallback = callback
+
+		// Use Comlink.proxy to pass the callback function
+		const proxyCallback = proxy(
+			async (
+				connId: bigint,
+				peerIp: string,
+				_port: number,
+				protocol: number,
+				host: string,
+				user: string
+			): Promise<MotdResult> => {
+				return this.handleMotd(connId, peerIp, protocol, host, user)
+			}
+		)
+
+		this.workerApi.setMotdCallback(proxyCallback as any)
 	}
 
 	async limit(opts: LimitOpts) {
@@ -440,6 +507,29 @@ export class Geofront {
 							this.workerTerminated = true
 						} else {
 							console.warn('移除路由回调时出错:', err?.message)
+						}
+					}
+				}
+
+				// 移除 MOTD 回调
+				if (!this.workerTerminated) {
+					try {
+						await Promise.race([
+							this.workerApi.removeMotdCallback(),
+							new Promise((_, reject) =>
+								setTimeout(() => reject(new Error('移除 MOTD 回调超时')), 1000)
+							)
+						])
+					} catch (err: any) {
+						const isWorkerError =
+							err?.message?.includes('Worker has been terminated') ||
+							err?.message?.includes('InvalidStateError') ||
+							err?.message?.includes('Worker is terminated')
+
+						if (isWorkerError) {
+							this.workerTerminated = true
+						} else {
+							console.warn('移除 MOTD 回调时出错:', err?.message)
 						}
 					}
 				}

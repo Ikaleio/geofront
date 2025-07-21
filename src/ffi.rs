@@ -6,13 +6,13 @@ use crate::{
     logging,
     state::{
         ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, LISTENER_COUNTER, LISTENER_STATE,
-        OPTIONS, PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTER_CALLBACK, TOTAL_BYTES_RECV,
-        TOTAL_BYTES_SENT, TOTAL_CONN,
+        MOTD_CALLBACK, OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE,
+        ROUTER_CALLBACK, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, TOTAL_CONN,
     },
     types::{
-        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, PROXY_ERR_BAD_PARAM,
-        PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND, PROXY_OK, ProxyConnection, ProxyError,
-        ProxyListener, ProxyRouterFn, RouteDecision,
+        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, MotdDecision,
+        PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND, PROXY_OK, ProxyConnection,
+        ProxyError, ProxyListener, ProxyMotdFn, ProxyRouterFn, RouteDecision,
     },
 };
 use governor::{Quota, RateLimiter};
@@ -135,6 +135,60 @@ pub unsafe extern "C" fn proxy_submit_routing_decision(
         error!(
             conn = conn_id,
             "No pending route decision found for this connection."
+        );
+        return PROXY_ERR_NOT_FOUND;
+    }
+
+    PROXY_OK
+}
+
+/// Register MOTD callback (must set before start)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_register_motd(cb: ProxyMotdFn) -> ProxyError {
+    logging::init_logging("info");
+    let mut motd_cb_guard = MOTD_CALLBACK.lock().unwrap();
+    *motd_cb_guard = Some(cb);
+    info!("MOTD callback registered");
+    PROXY_OK
+}
+
+/// Submits the MOTD decision from JS back to Rust.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_submit_motd_decision(
+    conn_id: ProxyConnection,
+    decision_json: *const c_char,
+) -> ProxyError {
+    if decision_json.is_null() {
+        return PROXY_ERR_BAD_PARAM;
+    }
+    let json_str = unsafe { CStr::from_ptr(decision_json) }.to_string_lossy();
+
+    let decision: MotdDecision = match serde_json::from_str(&json_str) {
+        Ok(d) => d,
+        Err(e) => {
+            error!(
+                conn = conn_id,
+                "Failed to parse submitted MOTD decision JSON: {}", e
+            );
+            MotdDecision {
+                disconnect: Some("Invalid JSON from MOTD callback".to_string()),
+                ..Default::default()
+            }
+        }
+    };
+
+    if let Some(sender) = PENDING_MOTDS.lock().unwrap().remove(&conn_id) {
+        if sender.send(decision).is_err() {
+            error!(
+                conn = conn_id,
+                "Failed to send MOTD decision: receiver dropped."
+            );
+            return PROXY_ERR_INTERNAL;
+        }
+    } else {
+        error!(
+            conn = conn_id,
+            "No pending MOTD decision found for this connection."
         );
         return PROXY_ERR_NOT_FOUND;
     }

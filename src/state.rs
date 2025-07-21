@@ -2,8 +2,8 @@
 //! Global state management.
 
 use crate::types::{
-    ConnMetrics, ConnectionManager, GeofrontOptions, ListenerState, ProxyConnection,
-    ProxyRouterFn, RouteDecision,
+    ConnMetrics, ConnectionManager, GeofrontOptions, ListenerState, MotdDecision, ProxyConnection,
+    ProxyMotdFn, ProxyRouterFn, RouteDecision,
 };
 use governor::{
     RateLimiter,
@@ -13,7 +13,7 @@ use governor::{
 use lazy_static::lazy_static;
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicU64, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicU64},
 };
 use tokio::sync::{Mutex, oneshot};
 use tracing_subscriber::{filter::EnvFilter, reload::Handle as ReloadHandle};
@@ -30,6 +30,9 @@ lazy_static! {
         std::sync::Mutex::new(HashMap::new());
     // Map to hold the senders for pending routing decisions
     pub static ref PENDING_ROUTES: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<RouteDecision>>> =
+        std::sync::Mutex::new(HashMap::new());
+    // Map to hold the senders for pending MOTD decisions
+    pub static ref PENDING_MOTDS: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<MotdDecision>>> =
         std::sync::Mutex::new(HashMap::new());
     pub static ref LISTENER_STATE: Arc<std::sync::Mutex<ListenerState>> =
         Arc::new(std::sync::Mutex::new(ListenerState::new()));
@@ -50,6 +53,10 @@ lazy_static! {
         std::sync::Mutex::new(None);
     pub static ref ROUTER_CALLBACK: std::sync::Mutex<Option<ProxyRouterFn>> =
         std::sync::Mutex::new(None);
+    pub static ref MOTD_CALLBACK: std::sync::Mutex<Option<ProxyMotdFn>> =
+        std::sync::Mutex::new(None);
     // This lock serializes all FFI calls to the router to prevent concurrency issues.
     pub static ref FFI_ROUTER_LOCK: Mutex<()> = Mutex::new(());
+    // This lock serializes all FFI calls to the MOTD callback to prevent concurrency issues.
+    pub static ref FFI_MOTD_LOCK: Mutex<()> = Mutex::new(());
 }

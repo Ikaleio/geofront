@@ -132,10 +132,50 @@ impl ConnectionManager {
     }
 }
 
+#[derive(Clone)]
 pub struct HandshakeData {
     pub protocol_version: i32,
     pub host: String,
     pub port: u16,
     #[allow(dead_code)]
     pub next_state: i32,
+}
+
+// MOTD callback signature - same parameters as router callback
+pub type ProxyMotdFn = extern "C" fn(
+    ProxyConnection,
+    *const std::os::raw::c_char, // peer_ip
+    std::os::raw::c_ushort,      // port
+    std::os::raw::c_uint,        // protocol
+    *const std::os::raw::c_char, // host
+    *const std::os::raw::c_char, // user
+);
+
+// MOTD decision structure
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct MotdDecision {
+    pub version: Option<MotdVersion>,
+    pub players: Option<MotdPlayers>,
+    pub description: Option<serde_json::Value>, // Can be string or component object
+    pub favicon: Option<String>,
+    pub disconnect: Option<String>, // If present, disconnect with this message instead
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MotdVersion {
+    pub name: String,
+    pub protocol: i32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MotdPlayers {
+    pub max: i32,
+    pub online: i32,
+    pub sample: Vec<MotdPlayerSample>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MotdPlayerSample {
+    pub name: String,
+    pub id: String,
 }
