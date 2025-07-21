@@ -1,421 +1,344 @@
-import { createServer, connect } from 'net'
-import type { Socket } from 'net'
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import type { Server } from 'net'
 import { randomBytes } from 'crypto'
-import { strict as assert } from 'assert'
+import { connect } from 'net'
 import { Geofront } from '../src/geofront'
+import {
+	startBackendServer,
+	runClientTest,
+	TEST_CONSTANTS,
+	getRandomPort,
+	createHandshakePacket,
+	createLoginStartPacket,
+	writeVarInt
+} from './helpers'
 
-// ===== 测试常量 =====
-const PROXY_PORT = 20001
-const BACKEND_PORT = 20000
-const BACKEND_HOST = '127.0.0.1'
-const TEST_HOST = 'mc.example.com'
-const TEST_USERNAME = 'geofront_test'
-const TEST_PROTOCOL_VERSION = 47 // 1.8.9
-const DATA_SIZE = 8 * 1024 * 1024 // 8MB
+describe('Geofront E2E Test: Standard Proxy', () => {
+	let geofront: Geofront
+	let backendServer: Server
+	let backendClosed: Promise<void>
+	let PROXY_PORT: number
+	let BACKEND_PORT: number
 
-// ===== 协议工具函数 =====
-function writeVarInt(value: number): Buffer {
-	const buffers: Buffer[] = []
-	do {
-		let temp = value & 0x7f
-		value >>>= 7
-		if (value !== 0) temp |= 0x80
-		buffers.push(Buffer.from([temp]))
-	} while (value !== 0)
-	return Buffer.concat(buffers)
-}
-
-function writeString(str: string): Buffer {
-	const strBuf = Buffer.from(str, 'utf8')
-	return Buffer.concat([writeVarInt(strBuf.length), strBuf])
-}
-
-function readVarInt(buffer: Buffer, offset: number): [number, number] {
-	let numRead = 0
-	let result = 0
-	let read: number
-	do {
-		if (offset + numRead >= buffer.length) {
-			throw new Error('Buffer underflow while reading VarInt')
-		}
-		read = buffer.readUInt8(offset + numRead)
-		const value = read & 0x7f
-		result |= value << (7 * numRead)
-		numRead++
-		if (numRead > 5) {
-			throw new Error('VarInt is too big')
-		}
-	} while ((read & 0x80) !== 0)
-	return [result, numRead]
-}
-
-function readString(buffer: Buffer, offset: number): [string, number] {
-	const [len, lenBytes] = readVarInt(buffer, offset)
-	const start = offset + lenBytes
-	const end = start + len
-	if (end > buffer.length) {
-		throw new Error('Buffer underflow while reading String')
-	}
-	const str = buffer.toString('utf8', start, end)
-	return [str, lenBytes + len]
-}
-
-function createHandshakePacket(
-	protocolVersion: number,
-	host: string,
-	port: number,
-	nextState: number
-): Buffer {
-	const packetId = writeVarInt(0x00)
-	const pv = writeVarInt(protocolVersion)
-	const hostBuf = writeString(host)
-	const portBuf = Buffer.alloc(2)
-	portBuf.writeUInt16BE(port, 0)
-	const state = writeVarInt(nextState)
-	const data = Buffer.concat([packetId, pv, hostBuf, portBuf, state])
-	return Buffer.concat([writeVarInt(data.length), data])
-}
-
-function createLoginStartPacket(username: string): Buffer {
-	const packetId = writeVarInt(0x00)
-	const nameBuf = writeString(username)
-	const data = Buffer.concat([packetId, nameBuf])
-	return Buffer.concat([writeVarInt(data.length), data])
-}
-
-function createLoginSuccessPacket(uuid: string, username: string): Buffer {
-	const packetId = writeVarInt(0x02)
-	const uuidBuf = writeString(uuid)
-	const nameBuf = writeString(username)
-	const data = Buffer.concat([packetId, uuidBuf, nameBuf])
-	return Buffer.concat([writeVarInt(data.length), data])
-}
-
-// ===== 模拟后端服务器 =====
-function startBackendServer(): Promise<{
-	server: import('net').Server
-	closed: Promise<void>
-}> {
-	return new Promise((resolve, reject) => {
-		let server: import('net').Server
-		const closedPromise = new Promise<void>((resolveClosed, rejectClosed) => {
-			server = createServer(socket => {
-				console.log('[Backend] 收到来自 Geofront 的连接')
-				let receivedData = Buffer.alloc(0)
-				let state = 'HANDSHAKE'
-				let receivedDownstreamBytes = 0
-				let transferStartTime = 0
-				const serverUploadData = randomBytes(DATA_SIZE)
-
-				socket.on('data', data => {
-					try {
-						receivedData = Buffer.concat([receivedData, data])
-
-						if (state === 'HANDSHAKE') {
-							const [packetLen, packetLenBytes] = readVarInt(receivedData, 0)
-							if (receivedData.length < packetLen + packetLenBytes) return
-
-							const packetStart = packetLenBytes
-							const [packetId, packetIdBytes] = readVarInt(
-								receivedData,
-								packetStart
-							)
-							assert.equal(packetId, 0x00, '后端收到的握手包 ID 不正确')
-
-							let offset = packetStart + packetIdBytes
-							const [protoVer, protoVerBytes] = readVarInt(receivedData, offset)
-							offset += protoVerBytes
-							const [host, hostBytes] = readString(receivedData, offset)
-							offset += hostBytes
-							const port = receivedData.readUInt16BE(offset)
-							offset += 2
-							const [nextState, _] = readVarInt(receivedData, offset)
-
-							console.log('[Backend] ✓ 验证握手包...')
-							assert.equal(protoVer, TEST_PROTOCOL_VERSION, '协议版本不匹配')
-							assert.equal(nextState, 2, '下一个状态不匹配')
-							console.log('[Backend] ✓ 握手包验证通过')
-
-							receivedData = receivedData.subarray(packetLen + packetLenBytes)
-							state = 'LOGIN'
-						}
-
-						if (state === 'LOGIN') {
-							if (receivedData.length === 0) return
-							const [packetLen, packetLenBytes] = readVarInt(receivedData, 0)
-							if (receivedData.length < packetLen + packetLenBytes) return
-
-							const packetStart = packetLenBytes
-							const [packetId, packetIdBytes] = readVarInt(
-								receivedData,
-								packetStart
-							)
-							assert.equal(packetId, 0x00, '后端收到的登录包 ID 不正确')
-
-							let offset = packetStart + packetIdBytes
-							const [username, _] = readString(receivedData, offset)
-
-							console.log('[Backend] ✓ 验证登录包...')
-							assert.equal(username, TEST_USERNAME, '用户名不匹配')
-							console.log('[Backend] ✓ 登录包验证通过')
-
-							const loginSuccessPacket = createLoginSuccessPacket(
-								'00000000-0000-0000-0000-000000000000',
-								username
-							)
-							socket.write(loginSuccessPacket)
-							console.log('[Backend] ✓ 已发送登录成功包')
-
-							receivedData = receivedData.subarray(packetLen + packetLenBytes)
-							state = 'TRANSFER'
-							console.log(
-								`[Backend] 开始接收 ${DATA_SIZE / 1024 / 1024}MB 下行数据...`
-							)
-							transferStartTime = Date.now()
-						}
-
-						if (state === 'TRANSFER') {
-							receivedDownstreamBytes += data.length
-							if (receivedDownstreamBytes === data.length) {
-								receivedDownstreamBytes = receivedData.length
-							}
-
-							if (receivedDownstreamBytes >= DATA_SIZE) {
-								const duration = (Date.now() - transferStartTime) / 1000
-								const speed =
-									(receivedDownstreamBytes / duration / 1024 / 1024) * 8
-								console.log(
-									`[Backend] ✓ 下行数据接收完毕 (${receivedDownstreamBytes} 字节, ${duration.toFixed(
-										2
-									)}s, ${speed.toFixed(2)} Mbps)`
-								)
-								assert.equal(
-									receivedDownstreamBytes,
-									DATA_SIZE,
-									'下行数据大小不匹配'
-								)
-								console.log(
-									`[Backend] 开始发送 ${DATA_SIZE / 1024 / 1024}MB 上行数据...`
-								)
-								socket.write(serverUploadData)
-								state = 'DONE'
-							}
-						}
-					} catch (e) {
-						rejectClosed(e)
-						socket.destroy()
-					}
-				})
-
-				socket.on('close', () => {
-					console.log('[Backend] 连接已关闭')
-					if (state === 'DONE') {
-						resolveClosed()
-					} else {
-						rejectClosed(new Error(`后端连接在非预期状态下关闭: ${state}`))
-					}
-				})
-
-				socket.on('error', err => {
-					rejectClosed(new Error(`后端 Socket 错误: ${err.message}`))
-				})
-			})
-
-			server.listen(BACKEND_PORT, BACKEND_HOST, () => {
-				console.log(
-					`[Backend] 模拟服务器已在 ${BACKEND_HOST}:${BACKEND_PORT} 上启动`
-				)
-				resolve({ server, closed: closedPromise })
-			})
-
-			server.on('error', err => {
-				reject(err)
-			})
-		})
-	})
-}
-
-// ===== 模拟客户端 =====
-function runClientTest(): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const clientUploadData = randomBytes(DATA_SIZE)
-		let receivedUpstreamBytes = 0
-		let transferStartTime = 0
-		let state = 'LOGIN'
-		let receivedData = Buffer.alloc(0)
-
-		const client = connect(PROXY_PORT, '127.0.0.1', () => {
-			console.log(`[Client] ✓ 已连接到 Geofront on 127.0.0.1:${PROXY_PORT}`)
-
-			const handshake = createHandshakePacket(
-				TEST_PROTOCOL_VERSION,
-				TEST_HOST,
-				PROXY_PORT,
-				2
-			)
-			client.write(handshake)
-			console.log('[Client] ✓ 已发送握手包')
-
-			const loginStart = createLoginStartPacket(TEST_USERNAME)
-			client.write(loginStart)
-			console.log('[Client] ✓ 已发送登录包')
-		})
-
-		client.on('data', data => {
-			try {
-				receivedData = Buffer.concat([receivedData, data])
-
-				if (state === 'LOGIN') {
-					const [packetLen, packetLenBytes] = readVarInt(receivedData, 0)
-					if (receivedData.length < packetLen + packetLenBytes) return
-
-					const packetStart = packetLenBytes
-					const [packetId, _] = readVarInt(receivedData, packetStart)
-
-					if (packetId === 0x02) {
-						console.log('[Client] ✓ 收到登录成功包')
-						state = 'TRANSFER'
-						receivedData = receivedData.subarray(packetLen + packetLenBytes)
-
-						console.log(
-							`[Client] 开始发送 ${DATA_SIZE / 1024 / 1024}MB 下行数据...`
-						)
-						client.write(clientUploadData)
-						console.log('[Client] ✓ 下行数据已发送')
-					} else {
-						throw new Error(`收到非预期的包，ID: 0x${packetId.toString(16)}`)
-					}
-				}
-
-				if (state === 'TRANSFER' && receivedData.length > 0) {
-					receivedUpstreamBytes += receivedData.length
-					if (transferStartTime === 0) {
-						transferStartTime = Date.now()
-					}
-					console.log(
-						`[Client] 收到上行数据: ${receivedData.length} 字节 (总计: ${receivedUpstreamBytes})`
-					)
-					receivedData = Buffer.alloc(0)
-
-					if (receivedUpstreamBytes >= DATA_SIZE) {
-						const duration = (Date.now() - transferStartTime) / 1000
-						const speed = (receivedUpstreamBytes / duration / 1024 / 1024) * 8
-						console.log(
-							`[Client] ✓ 上行数据接收完毕 (${receivedUpstreamBytes} 字节, ${duration.toFixed(
-								2
-							)}s, ${speed.toFixed(2)} Mbps)`
-						)
-						assert.equal(receivedUpstreamBytes, DATA_SIZE, '上行数据大小不匹配')
-						client.end()
-					}
-				}
-			} catch (e) {
-				reject(e)
-				client.destroy()
+	beforeAll(async () => {
+		PROXY_PORT = getRandomPort()
+		BACKEND_PORT = getRandomPort()
+		// 启动后端服务器 - 配置为在游戏阶段回显接收到的数据
+		const backend = await startBackendServer({
+			port: BACKEND_PORT,
+			onData: (data, socket) => {
+				// 回显接收到的数据（用于大数据包测试）
+				socket.write(data)
 			}
 		})
+		backendServer = backend.server
+		backendClosed = backend.closed
 
-		client.on('close', () => {
-			console.log('[Client] ✓ 连接已关闭')
-			resolve()
-		})
-
-		client.on('error', err => {
-			reject(new Error(`客户端连接错误: ${err.message}`))
-		})
-	})
-}
-
-// ===== 主测试函数 =====
-async function main() {
-	console.log('=== 开始 Geofront 端到端测试 ===')
-	let geofront: Geofront | null = null
-	let backendServer: import('net').Server | null = null
-
-	try {
-		// 1. 创建 Geofront 实例
-		console.log('[Geofront] 初始化...')
+		// 启动 Geofront
 		geofront = new Geofront()
-		console.log('[Geofront] ✓ 实例已创建')
+		await geofront.initialize()
 
-		// 2. 设置路由回调
+		// 设置选项测试
+		const result = await geofront.setOptions({
+			proxyProtocolIn: 'none'
+		})
+		expect(result).toBe(0) // 应该返回成功状态码
+
 		geofront.setRouter((ip, host, player, protocol) => {
-			console.log(
-				`🚀 [Router] 收到新连接: ip=${ip}, host=${host}, player=${player}, protocol=${protocol}`
-			)
-			// 路由到后端服务器
 			return {
-				remoteHost: BACKEND_HOST,
+				remoteHost: TEST_CONSTANTS.BACKEND_HOST,
 				remotePort: BACKEND_PORT
 			}
 		})
-		console.log('[Geofront] ✓ 路由回调已设置')
-
-		// 3. 启动监听器
 		await geofront.listen('0.0.0.0', PROXY_PORT)
-		console.log(`[Geofront] ✓ 代理监听器已启动在端口 ${PROXY_PORT}`)
+	})
 
-		// // 4. 设置全局速率限制 (可选)
-		// await geofront.limit({
-		// 	sendAvg: 1024 * 1024, // 1 MiB/s
-		// 	sendBurst: 1024 * 1024, // 1 MiB burst
-		// 	recvAvg: 1024 * 1024, // 1 MiB/s
-		// 	recvBurst: 1024 * 1024 // 1 MiB burst
-		// }) // 1MB/s
-		console.log('[Geofront] ✓ 全局速率限制已设置')
+	afterAll(async () => {
+		// 确保所有资源都被正确清理，即使发生错误也要继续清理其他资源
+		const errors: string[] = []
+		let geofrontShutdownSuccessful = false
 
-		// 5. 显示初始统计信息
-		console.log('[Geofront] 初始统计信息:')
-		console.log(`  - 总连接数: ${geofront.metrics.total_conn}`)
-		console.log(`  - 活跃连接数: ${geofront.metrics.active_conn}`)
-		console.log(`  - 总发送字节: ${geofront.metrics.total_bytes_sent}`)
-		console.log(`  - 总接收字节: ${geofront.metrics.total_bytes_recv}`)
-
-		// 6. 启动后端服务器
-		const { server, closed: backendPromise } = await startBackendServer()
-		backendServer = server
-
-		// 7. 运行客户端测试
-		const clientPromise = runClientTest()
-
-		// 8. 等待所有部分完成
-		await Promise.all([backendPromise, clientPromise])
-
-		// 9. 显示最终统计信息
-		await geofront.updateMetrics()
-		console.log('\n[Geofront] 最终统计信息:')
-		console.log(`  - 总连接数: ${geofront.metrics.total_conn}`)
-		console.log(`  - 活跃连接数: ${geofront.metrics.active_conn}`)
-		console.log(`  - 总发送字节: ${geofront.metrics.total_bytes_sent}`)
-		console.log(`  - 总接收字节: ${geofront.metrics.total_bytes_recv}`)
-
-		// 10. 测试连接管理
-		for await (const conn of geofront.connections()) {
-			console.log(
-				`  - 连接 ${new Date(
-					conn.when
-				).toLocaleString()}: ${await conn.metrics}`
-			)
-		}
-
-		console.log('\n✅✅✅ Geofront 端到端测试成功! ✅✅✅')
-	} catch (error) {
-		console.error('\n❌❌❌ Geofront 端到端测试失败! ❌❌❌')
-		console.error(error)
-		process.exit(1)
-	} finally {
-		// 11. 清理
+		// 清理 Geofront - 使用更健壮的错误处理
 		if (geofront) {
-			console.log('[Geofront] 关闭...')
-			await geofront.shutdown()
-			console.log('[Geofront] ✓ 已关闭')
-		}
-		if (backendServer) {
-			backendServer.close(() => {
-				console.log('[Backend] ✓ 已关闭')
-			})
-		}
-	}
-}
+			try {
+				await Promise.race([
+					geofront.shutdown().then(() => {
+						geofrontShutdownSuccessful = true
+					}),
+					new Promise<void>((_, reject) =>
+						setTimeout(() => reject(new Error('Geofront 关闭超时')), 8000)
+					)
+				])
+			} catch (err: any) {
+				// 忽略常见的 Worker 终止错误
+				const isWorkerTerminatedError =
+					err?.message?.includes('Worker has been terminated') ||
+					err?.message?.includes('InvalidStateError') ||
+					err?.message?.includes('Worker is terminated')
 
-main()
+				if (!isWorkerTerminatedError && !err?.message?.includes('关闭超时')) {
+					errors.push(`关闭 Geofront 时发生错误: ${err?.message || err}`)
+				}
+			}
+
+			// 如果 Geofront 关闭失败，尝试强制清理
+			if (!geofrontShutdownSuccessful) {
+				try {
+					// 给更多时间让清理完成
+					await new Promise(resolve => setTimeout(resolve, 500))
+					geofront = null as any
+				} catch (e) {
+					// 忽略强制清理的错误
+				}
+			}
+		}
+
+		// 在并行测试环境中，给额外的时间让 Comlink 清理完成
+		await new Promise(resolve => setTimeout(resolve, 200))
+
+		// 清理后端服务器
+		if (backendServer) {
+			try {
+				await new Promise<void>((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						reject(new Error('后端服务器关闭超时'))
+					}, 3000)
+
+					backendServer.close(err => {
+						clearTimeout(timeout)
+						if (err) reject(err)
+						else resolve()
+					})
+				})
+			} catch (err: any) {
+				errors.push(`关闭后端服务器时发生错误: ${err?.message || err}`)
+			}
+		}
+
+		// 等待后端服务器完全关闭
+		if (backendClosed) {
+			try {
+				await Promise.race([
+					backendClosed,
+					new Promise<void>((_, reject) =>
+						setTimeout(() => reject(new Error('等待后端服务器关闭超时')), 2000)
+					)
+				])
+			} catch (err: any) {
+				errors.push(`等待后端服务器关闭时发生错误: ${err?.message || err}`)
+			}
+		}
+
+		// 如果有非关键错误，记录但不抛出
+		if (errors.length > 0) {
+			console.warn('清理过程中出现非关键错误:', errors.join('; '))
+		}
+	})
+
+	test('should proxy 8MB random data correctly between client and backend', async () => {
+		// 生成 8MB 随机数据
+		const DATA_SIZE = 8 * 1024 * 1024 // 8MB
+		const originalData = randomBytes(DATA_SIZE)
+
+		const testResult = new Promise<{ success: boolean; error?: string }>(
+			resolve => {
+				let client: any = null
+				let timeoutId: NodeJS.Timeout | null = null
+				let resolved = false
+				let gamePhase = false
+				let loginSuccessReceived = false
+
+				// 安全的resolve函数，确保只调用一次并清理资源
+				const safeResolve = (result: { success: boolean; error?: string }) => {
+					if (resolved) return
+					resolved = true
+
+					// 清理超时
+					if (timeoutId) {
+						clearTimeout(timeoutId)
+						timeoutId = null
+					}
+
+					// 强制关闭客户端连接
+					if (client) {
+						try {
+							client.destroy()
+						} catch (e) {
+							// 忽略关闭时的错误
+						}
+						client = null
+					}
+
+					resolve(result)
+				}
+
+				try {
+					client = connect(PROXY_PORT, '127.0.0.1', () => {
+						try {
+							// 发送握手包
+							const handshake = createHandshakePacket(
+								TEST_CONSTANTS.TEST_PROTOCOL_VERSION,
+								TEST_CONSTANTS.TEST_HOST,
+								PROXY_PORT,
+								2 // Login state
+							)
+							client.write(handshake)
+
+							// 发送登录开始包
+							const loginStart = createLoginStartPacket(
+								TEST_CONSTANTS.TEST_USERNAME
+							)
+							client.write(loginStart)
+						} catch (err: any) {
+							safeResolve({
+								success: false,
+								error: `发送握手包失败: ${err.message}`
+							})
+						}
+					})
+
+					let receivedData = Buffer.alloc(0)
+					let dataReceived = false
+
+					client.on('data', (data: Buffer) => {
+						try {
+							receivedData = Buffer.concat([receivedData, data])
+
+							if (!gamePhase) {
+								// 等待登录成功包
+								if (!loginSuccessReceived && receivedData.length > 0) {
+									loginSuccessReceived = true
+									gamePhase = true
+
+									// 创建一个自定义数据包，包含8MB随机数据
+									const packetId = writeVarInt(0x10) // 使用一个不常用的包ID
+									const packetData = Buffer.concat([packetId, originalData])
+									const packet = Buffer.concat([
+										writeVarInt(packetData.length),
+										packetData
+									])
+
+									client.write(packet)
+
+									// 重置接收缓冲区，准备接收回显数据
+									receivedData = Buffer.alloc(0)
+								}
+							} else {
+								// 游戏阶段，检查数据回显
+								if (receivedData.length >= DATA_SIZE + 5) {
+									// 包长度 + 包ID + 数据
+									dataReceived = true
+
+									// 跳过包长度和包ID，获取实际数据
+									let offset = 0
+									// 读取包长度
+									const [packetLen, packetLenBytes] = readVarInt(
+										receivedData,
+										offset
+									)
+									offset += packetLenBytes
+									// 读取包ID
+									const [packetId, packetIdBytes] = readVarInt(
+										receivedData,
+										offset
+									)
+									offset += packetIdBytes
+
+									// 提取实际数据
+									const actualData = receivedData.subarray(
+										offset,
+										offset + DATA_SIZE
+									)
+
+									// 验证数据完整性
+									if (actualData.length === DATA_SIZE) {
+										const isDataCorrect = originalData.equals(actualData)
+										if (isDataCorrect) {
+											safeResolve({ success: true })
+										} else {
+											safeResolve({
+												success: false,
+												error: `数据不匹配: 发送 ${DATA_SIZE} 字节，接收 ${actualData.length} 字节，内容不一致`
+											})
+										}
+									} else {
+										safeResolve({
+											success: false,
+											error: `数据长度不匹配: 期望 ${DATA_SIZE} 字节，实际接收 ${actualData.length} 字节`
+										})
+									}
+								}
+							}
+						} catch (err: any) {
+							safeResolve({
+								success: false,
+								error: `处理接收数据时出错: ${err.message}`
+							})
+						}
+					})
+
+					client.on('error', (err: Error) => {
+						safeResolve({ success: false, error: `客户端错误: ${err.message}` })
+					})
+
+					client.on('close', () => {
+						if (!dataReceived && !resolved) {
+							if (!gamePhase) {
+								safeResolve({
+									success: false,
+									error: '连接在登录阶段就被关闭了'
+								})
+							} else {
+								safeResolve({
+									success: false,
+									error: `连接关闭但数据未完全接收: 期望 ${DATA_SIZE} 字节，实际接收 ${receivedData.length} 字节`
+								})
+							}
+						}
+					})
+
+					// 设置超时，防止测试挂起
+					timeoutId = setTimeout(() => {
+						safeResolve({
+							success: false,
+							error: `测试超时: 游戏阶段=${gamePhase}, 期望 ${DATA_SIZE} 字节，实际接收 ${receivedData.length} 字节`
+						})
+					}, 30000) // 30秒超时
+				} catch (err: any) {
+					safeResolve({
+						success: false,
+						error: `创建客户端连接失败: ${err.message}`
+					})
+				}
+			}
+		)
+
+		// 辅助函数：读取 VarInt
+		function readVarInt(buffer: Buffer, offset: number): [number, number] {
+			let numRead = 0
+			let result = 0
+			let read: number
+			do {
+				if (offset + numRead >= buffer.length) {
+					throw new Error('Buffer underflow while reading VarInt')
+				}
+				read = buffer.readUInt8(offset + numRead)
+				const value = read & 0x7f
+				result |= value << (7 * numRead)
+				numRead++
+				if (numRead > 5) {
+					throw new Error('VarInt is too big')
+				}
+			} while ((read & 0x80) !== 0)
+			return [result, numRead]
+		}
+
+		const result = await testResult
+
+		if (!result.success) {
+			throw new Error(result.error)
+		}
+
+		expect(result.success).toBe(true)
+	})
+})

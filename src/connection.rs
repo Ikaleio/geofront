@@ -4,23 +4,154 @@
 use crate::{
     protocol::{self, write_disconnect},
     state::{
-        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, FFI_ROUTER_LOCK, PENDING_ROUTES, RATE_LIMITERS,
-        ROUTER_CALLBACK, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
+        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, FFI_ROUTER_LOCK, OPTIONS, PENDING_ROUTES,
+        RATE_LIMITERS, ROUTER_CALLBACK, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
     },
-    types::{AsyncStream, HandshakeData, ProxyConnection, RouteDecision},
+    types::{AsyncStream, HandshakeData, ProxyConnection, ProxyProtocolIn, RouteDecision},
 };
-use std::{ffi::CString, num::NonZeroU32, sync::atomic::Ordering};
+use ppp::PartialResult;
+use std::{ffi::CString, net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     sync::oneshot,
 };
 use tokio_socks::tcp::Socks5Stream;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 /// Main connection workflow
 pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
+    let options = (*OPTIONS.read().unwrap()).clone();
+    let mut peer_addr_override: Option<SocketAddr> = None;
+
+    // Handle Proxy Protocol
+    if options.proxy_protocol_in != ProxyProtocolIn::None {
+        let mut buf = [0; 536]; // Max size for PROXY protocol v1/v2 header
+        let n = match inbound.peek(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                error!(conn = conn_id, "Failed to peek for PROXY protocol: {}", e);
+                cleanup_conn(conn_id);
+                return;
+            }
+        };
+
+        let header_result = ppp::HeaderResult::parse(&buf[..n]);
+
+        if header_result.is_incomplete() {
+            // Incomplete header. In normal mode, we proceed. In strict mode, we disconnect.
+            if options.proxy_protocol_in == ProxyProtocolIn::Strict {
+                warn!(
+                    conn = conn_id,
+                    "Incomplete PROXY protocol header in strict mode, disconnecting."
+                );
+                cleanup_conn(conn_id);
+                return;
+            }
+        } else if header_result.is_complete() {
+            // Try to extract header information based on the result variant
+            match header_result {
+                ppp::HeaderResult::V1(Ok(header)) => {
+                    // For v1 headers, we need to calculate the header length from the input
+                    let header_str = header.header.as_ref();
+                    let header_len = header_str.len();
+
+                    // Actually consume the header from the stream
+                    let mut discard_buf = vec![0; header_len];
+                    if inbound.read_exact(&mut discard_buf).await.is_err() {
+                        error!(
+                            conn = conn_id,
+                            "Failed to read PROXY protocol header after peek"
+                        );
+                        cleanup_conn(conn_id);
+                        return;
+                    }
+
+                    // Extract source address from v1 header
+                    if let ppp::v1::Addresses::Tcp4(tcp4) = &header.addresses {
+                        let source_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                            tcp4.source_address,
+                            tcp4.source_port,
+                        ));
+                        peer_addr_override = Some(source_addr);
+                        info!(conn = conn_id, real_ip = %source_addr.ip(), "Received PROXY protocol v1 header");
+                    } else if let ppp::v1::Addresses::Tcp6(tcp6) = &header.addresses {
+                        let source_addr = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                            tcp6.source_address,
+                            tcp6.source_port,
+                            0,
+                            0,
+                        ));
+                        peer_addr_override = Some(source_addr);
+                        info!(conn = conn_id, real_ip = %source_addr.ip(), "Received PROXY protocol v1 header");
+                    }
+                }
+                ppp::HeaderResult::V2(Ok(header)) => {
+                    let header_len = header.len();
+
+                    // Actually consume the header from the stream
+                    let mut discard_buf = vec![0; header_len];
+                    if inbound.read_exact(&mut discard_buf).await.is_err() {
+                        error!(
+                            conn = conn_id,
+                            "Failed to read PROXY protocol header after peek"
+                        );
+                        cleanup_conn(conn_id);
+                        return;
+                    }
+
+                    // Extract source address from v2 header
+                    match &header.addresses {
+                        ppp::v2::Addresses::IPv4(ipv4) => {
+                            let source_addr = std::net::SocketAddr::V4(
+                                std::net::SocketAddrV4::new(ipv4.source_address, ipv4.source_port),
+                            );
+                            peer_addr_override = Some(source_addr);
+                            info!(conn = conn_id, real_ip = %source_addr.ip(), "Received PROXY protocol v2 header");
+                        }
+                        ppp::v2::Addresses::IPv6(ipv6) => {
+                            let source_addr =
+                                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                                    ipv6.source_address,
+                                    ipv6.source_port,
+                                    0,
+                                    0,
+                                ));
+                            peer_addr_override = Some(source_addr);
+                            info!(conn = conn_id, real_ip = %source_addr.ip(), "Received PROXY protocol v2 header");
+                        }
+                        _ => {
+                            // Unix or other address types - no IP to extract
+                            info!(conn = conn_id, "Received PROXY protocol v2 header (non-IP)");
+                        }
+                    }
+                }
+                _ => {
+                    // Parse error. In normal mode, we proceed. In strict mode, we disconnect.
+                    if options.proxy_protocol_in == ProxyProtocolIn::Strict {
+                        warn!(
+                            conn = conn_id,
+                            "Missing or invalid PROXY protocol header in strict mode, disconnecting."
+                        );
+                        cleanup_conn(conn_id);
+                        return;
+                    }
+                }
+            }
+        } else {
+            // Error case. In normal mode, we proceed. In strict mode, we disconnect.
+            if options.proxy_protocol_in == ProxyProtocolIn::Strict {
+                warn!(
+                    conn = conn_id,
+                    "Missing or invalid PROXY protocol header in strict mode, disconnecting."
+                );
+                cleanup_conn(conn_id);
+                return;
+            }
+        }
+    }
+
     // Parse handshake & login
     let mut hs = match protocol::parse_handshake(&mut inbound).await {
         Ok(h) => h,
@@ -40,9 +171,13 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     };
 
     // Route
-    let peer_ip = inbound
-        .peer_addr()
-        .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string());
+    let peer_ip = peer_addr_override
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| {
+            inbound
+                .peer_addr()
+                .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string())
+        });
 
     // Asynchronously get the routing decision.
     let route_decision = match get_route_info(conn_id, &hs, &username, &peer_ip).await {
@@ -131,63 +266,21 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
 
     // If PROXY protocol is enabled, send the header first.
     if let Some(version) = route_decision.proxy_protocol {
-        let inbound_addr = inbound.peer_addr().unwrap();
-        let outbound_addr = inbound.local_addr().unwrap(); // Assuming this is the proxy's address
+        let source_addr = peer_addr_override.unwrap_or_else(|| inbound.peer_addr().unwrap());
+        let destination_addr = inbound.local_addr().unwrap();
+
         let proxy_header = match version {
             1 => {
-                // PROXY TCP4 192.168.0.1 192.168.0.11 56324 12345\r\n
-                format!(
-                    "PROXY TCP4 {} {} {} {}\r\n",
-                    inbound_addr.ip(),
-                    outbound_addr.ip(),
-                    inbound_addr.port(),
-                    outbound_addr.port()
-                )
-                .into_bytes()
+                let addrs = ppp::v1::Addresses::from((source_addr, destination_addr));
+                format!("{}\r\n", addrs).into_bytes()
             }
-            2 => {
-                // Construct PROXY protocol v2 header
-                let mut header = vec![
-                    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
-                ]; // Magic
-                header.push(0x21); // v2, PROXY
-                match (inbound_addr, outbound_addr) {
-                    (std::net::SocketAddr::V4(_), std::net::SocketAddr::V4(_)) => {
-                        header.push(0x11); // AF_INET, STREAM
-                        header.extend_from_slice(&12u16.to_be_bytes()); // len
-                        header.extend_from_slice(&match inbound_addr.ip() {
-                            std::net::IpAddr::V4(ip) => ip.octets(),
-                            _ => unreachable!(),
-                        });
-                        header.extend_from_slice(&match outbound_addr.ip() {
-                            std::net::IpAddr::V4(ip) => ip.octets(),
-                            _ => unreachable!(),
-                        });
-                        header.extend_from_slice(&inbound_addr.port().to_be_bytes());
-                        header.extend_from_slice(&outbound_addr.port().to_be_bytes());
-                    }
-                    (std::net::SocketAddr::V6(_), std::net::SocketAddr::V6(_)) => {
-                        header.push(0x21); // AF_INET6, STREAM
-                        header.extend_from_slice(&36u16.to_be_bytes()); // len
-                        header.extend_from_slice(&match inbound_addr.ip() {
-                            std::net::IpAddr::V6(ip) => ip.octets(),
-                            _ => unreachable!(),
-                        });
-                        header.extend_from_slice(&match outbound_addr.ip() {
-                            std::net::IpAddr::V6(ip) => ip.octets(),
-                            _ => unreachable!(),
-                        });
-                        header.extend_from_slice(&inbound_addr.port().to_be_bytes());
-                        header.extend_from_slice(&outbound_addr.port().to_be_bytes());
-                    }
-                    _ => {
-                        // Mixed or other address families not supported in this simple case
-                        header.push(0x00); // UNSPEC
-                        header.extend_from_slice(&0u16.to_be_bytes());
-                    }
-                }
-                header
-            }
+            2 => ppp::v2::Builder::with_addresses(
+                ppp::v2::Version::Two | ppp::v2::Command::Proxy,
+                ppp::v2::Protocol::Stream,
+                (source_addr, destination_addr),
+            )
+            .build()
+            .unwrap_or_default(),
             _ => vec![], // Unsupported version
         };
 
@@ -288,13 +381,20 @@ where
                         b.shutdown().await?;
                     }
                 } else {
-                    if let Some(num) = NonZeroU32::new(n as u32) {
-                        send_limiter.until_n_ready(num).await.unwrap();
+                    let mut remaining = n;
+                    let mut offset = 0;
+                    while remaining > 0 {
+                        let chunk_size = std::cmp::min(remaining, 1024);
+                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                            send_limiter.until_n_ready(num).await.unwrap();
+                        }
+                        b.write_all(&a_buf[offset..offset + chunk_size]).await?;
+                        a_to_b_copied += chunk_size as u64;
+                        conn_metrics.bytes_sent.fetch_add(chunk_size as u64, Ordering::SeqCst);
+                        TOTAL_BYTES_SENT.fetch_add(chunk_size as u64, Ordering::SeqCst);
+                        offset += chunk_size;
+                        remaining -= chunk_size;
                     }
-                    b.write_all(&a_buf[..n]).await?;
-                    a_to_b_copied += n as u64;
-                    conn_metrics.bytes_sent.fetch_add(n as u64, Ordering::SeqCst);
-                    TOTAL_BYTES_SENT.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             result = b.read(&mut b_buf), if !b_closed => {
@@ -305,13 +405,20 @@ where
                         a.shutdown().await?;
                     }
                 } else {
-                    if let Some(num) = NonZeroU32::new(n as u32) {
-                        recv_limiter.until_n_ready(num).await.unwrap();
+                    let mut remaining = n;
+                    let mut offset = 0;
+                    while remaining > 0 {
+                        let chunk_size = std::cmp::min(remaining, 1024);
+                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                            recv_limiter.until_n_ready(num).await.unwrap();
+                        }
+                        a.write_all(&b_buf[offset..offset + chunk_size]).await?;
+                        b_to_a_copied += chunk_size as u64;
+                        conn_metrics.bytes_recv.fetch_add(chunk_size as u64, Ordering::SeqCst);
+                        TOTAL_BYTES_RECV.fetch_add(chunk_size as u64, Ordering::SeqCst);
+                        offset += chunk_size;
+                        remaining -= chunk_size;
                     }
-                    a.write_all(&b_buf[..n]).await?;
-                    b_to_a_copied += n as u64;
-                    conn_metrics.bytes_recv.fetch_add(n as u64, Ordering::SeqCst);
-                    TOTAL_BYTES_RECV.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             else => {
@@ -386,10 +493,6 @@ fn request_route_info(conn_id: ProxyConnection, hs: &HandshakeData, username: &s
     let host_ptr = CString::new(hs.host.clone()).unwrap().into_raw();
     let username_ptr = CString::new(username).unwrap().into_raw();
 
-    info!(
-        conn = conn_id,
-        "Requesting route decision from JavaScript..."
-    );
     cb(
         conn_id,
         peer_ip_ptr,

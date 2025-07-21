@@ -6,13 +6,13 @@ use crate::{
     logging,
     state::{
         ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, LISTENER_COUNTER, LISTENER_STATE,
-        PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTER_CALLBACK, TOTAL_BYTES_RECV,
+        OPTIONS, PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTER_CALLBACK, TOTAL_BYTES_RECV,
         TOTAL_BYTES_SENT, TOTAL_CONN,
     },
     types::{
-        ConnMetrics, ConnMetricsSnapshot, MetricsSnapshot, PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL,
-        PROXY_ERR_NOT_FOUND, PROXY_OK, ProxyConnection, ProxyError, ProxyListener, ProxyRouterFn,
-        RouteDecision,
+        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, PROXY_ERR_BAD_PARAM,
+        PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND, PROXY_OK, ProxyConnection, ProxyError,
+        ProxyListener, ProxyRouterFn, RouteDecision,
     },
 };
 use governor::{Quota, RateLimiter};
@@ -30,6 +30,28 @@ use std::{
 use tokio::net::TcpListener;
 use tracing::{error, info};
 use tracing_subscriber::filter::EnvFilter;
+
+/// Set global options from a JSON string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_set_options(options_json: *const c_char) -> ProxyError {
+    if options_json.is_null() {
+        return PROXY_ERR_BAD_PARAM;
+    }
+    let json_str = unsafe { CStr::from_ptr(options_json) }.to_string_lossy();
+    let options: GeofrontOptions = match serde_json::from_str(&json_str) {
+        Ok(opts) => opts,
+        Err(e) => {
+            error!("Failed to parse options JSON: {}", e);
+            return PROXY_ERR_BAD_PARAM;
+        }
+    };
+
+    let mut opts_guard = OPTIONS.write().unwrap();
+    *opts_guard = options;
+
+    info!("Updated global options");
+    PROXY_OK
+}
 
 /// Initialize global logging level
 #[unsafe(no_mangle)]
@@ -214,17 +236,17 @@ pub unsafe extern "C" fn proxy_disconnect(conn_id: ProxyConnection) -> ProxyErro
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn proxy_set_rate_limit(
     conn_id: ProxyConnection,
-    send_avg_bps: u64,
-    send_burst_bps: u64,
-    recv_avg_bps: u64,
-    recv_burst_bps: u64,
+    send_avg_bytes_per_sec: u64,
+    send_burst_bytes_per_sec: u64,
+    recv_avg_bytes_per_sec: u64,
+    recv_burst_bytes_per_sec: u64,
 ) -> ProxyError {
     let mut rl = RATE_LIMITERS.lock().unwrap();
     if let Some((send_l, recv_l)) = rl.get_mut(&conn_id) {
-        let send_avg = NonZeroU32::new(send_avg_bps as u32).unwrap_or(nonzero!(u32::MAX));
-        let send_burst = NonZeroU32::new(send_burst_bps as u32).unwrap_or(send_avg);
-        let recv_avg = NonZeroU32::new(recv_avg_bps as u32).unwrap_or(nonzero!(u32::MAX));
-        let recv_burst = NonZeroU32::new(recv_burst_bps as u32).unwrap_or(recv_avg);
+        let send_avg = NonZeroU32::new(send_avg_bytes_per_sec as u32).unwrap_or(nonzero!(u32::MAX));
+        let send_burst = NonZeroU32::new(send_burst_bytes_per_sec as u32).unwrap_or(send_avg);
+        let recv_avg = NonZeroU32::new(recv_avg_bytes_per_sec as u32).unwrap_or(nonzero!(u32::MAX));
+        let recv_burst = NonZeroU32::new(recv_burst_bytes_per_sec as u32).unwrap_or(recv_avg);
 
         *send_l = Arc::new(RateLimiter::direct(
             Quota::per_second(send_avg).allow_burst(send_burst),
@@ -235,10 +257,10 @@ pub unsafe extern "C" fn proxy_set_rate_limit(
 
         info!(
             conn = conn_id,
-            send_avg = send_avg_bps,
-            send_burst = send_burst_bps,
-            recv_avg = recv_avg_bps,
-            recv_burst = recv_burst_bps,
+            send_avg = send_avg_bytes_per_sec,
+            send_burst = send_burst_bytes_per_sec,
+            recv_avg = recv_avg_bytes_per_sec,
+            recv_burst = recv_burst_bytes_per_sec,
             "Updated rate limits"
         );
         PROXY_OK

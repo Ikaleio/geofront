@@ -6,6 +6,27 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyProtocolIn {
+    Optional,
+    Strict,
+    None,
+}
+
+impl Default for ProxyProtocolIn {
+    fn default() -> Self {
+        ProxyProtocolIn::None
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GeofrontOptions {
+    #[serde(default)]
+    pub proxy_protocol_in: ProxyProtocolIn,
+}
+
 // Error codes
 pub type ProxyError = i32;
 pub const PROXY_OK: ProxyError = 0;

@@ -2,7 +2,8 @@
 //! Global state management.
 
 use crate::types::{
-    ConnMetrics, ConnectionManager, ListenerState, ProxyConnection, ProxyRouterFn, RouteDecision,
+    ConnMetrics, ConnectionManager, GeofrontOptions, ListenerState, ProxyConnection,
+    ProxyRouterFn, RouteDecision,
 };
 use governor::{
     RateLimiter,
@@ -12,7 +13,7 @@ use governor::{
 use lazy_static::lazy_static;
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, atomic::AtomicU64, RwLock},
 };
 use tokio::sync::{Mutex, oneshot};
 use tracing_subscriber::{filter::EnvFilter, reload::Handle as ReloadHandle};
@@ -24,6 +25,7 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_RECV: AtomicU64 = AtomicU64::new(0);
 
 lazy_static! {
+    pub static ref OPTIONS: RwLock<GeofrontOptions> = RwLock::new(GeofrontOptions::default());
     pub static ref CONN_METRICS: std::sync::Mutex<HashMap<ProxyConnection, Arc<ConnMetrics>>> =
         std::sync::Mutex::new(HashMap::new());
     // Map to hold the senders for pending routing decisions

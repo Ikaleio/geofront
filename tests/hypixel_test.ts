@@ -1,19 +1,16 @@
+import { describe, test } from 'bun:test'
 import { Geofront } from '../src/geofront'
 
-// ===== 测试常量 =====
 const PROXY_HOST = '0.0.0.0'
 const PROXY_PORT = 32767
 const HYPIXEL_HOST = 'mc.hypixel.net'
 const HYPIXEL_PORT = 25565
 
-// ===== 主测试函数 =====
-async function main() {
-	console.log('=== 启动 Geofront Hypixel 代理 ===')
-	let geofront: Geofront | null = null
-
-	try {
-		geofront = new Geofront()
-
+describe.skip('Manual Test: Hypixel Proxy', () => {
+	test('should run a proxy server for manual testing with a Minecraft client', async () => {
+		console.log('=== 启动 Geofront Hypixel 代理 (手动测试) ===')
+		const geofront = new Geofront()
+		await geofront.initialize()
 		geofront.setRouter((ip, host, player, protocol) => {
 			console.log(
 				`[Router] New connection: ip=${ip}, host=${host}, player=${player}, protocol=${protocol}`
@@ -29,21 +26,15 @@ async function main() {
 		console.log(
 			`✓ Geofront proxy for Hypixel is running on ${PROXY_HOST}:${PROXY_PORT}`
 		)
-		console.log('Press Ctrl+C to shut down.')
+		console.log('Connect to it with your Minecraft client.')
+		console.log('Press Ctrl+C in the terminal to shut down.')
 
-		// Keep the process alive
-		process.stdin.resume()
-		process.on('SIGINT', async () => {
-			console.log('\nGracefully shutting down...')
-			if (geofront) {
-				await geofront.shutdown()
-			}
-			process.exit(0)
+		// Keep the test running until manually stopped
+		await new Promise(resolve => {
+			process.on('SIGINT', () => {
+				console.log('\nGracefully shutting down...')
+				geofront.shutdown().then(resolve)
+			})
 		})
-	} catch (error) {
-		console.error('Failed to start Geofront proxy:', error)
-		process.exit(1)
-	}
-}
-
-main()
+	})
+})

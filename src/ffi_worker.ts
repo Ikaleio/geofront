@@ -52,7 +52,17 @@ class GeofrontWorkerAPI {
 					break
 			}
 
+			if (isDev) {
+				console.log(
+					`[WARN] Development mode: Loading FFI library from: ${libPath}`
+				)
+			}
+
 			const { symbols: ffiSymbols } = dlopen(libPath, {
+				proxy_set_options: {
+					args: [FFIType.cstring],
+					returns: FFIType.i32
+				},
 				proxy_register_router: {
 					args: [FFIType.function],
 					returns: FFIType.i32
@@ -70,10 +80,10 @@ class GeofrontWorkerAPI {
 				proxy_set_rate_limit: {
 					args: [
 						FFIType.u64, // connId
-						FFIType.u64, // send_avg_bps
-						FFIType.u64, // send_burst_bps
-						FFIType.u64, // recv_avg_bps
-						FFIType.u64 // recv_burst_bps
+						FFIType.u64, // send_avg_bytes_per_sec
+						FFIType.u64, // send_burst_bytes_per_sec
+						FFIType.u64, // recv_avg_bytes_per_sec
+						FFIType.u64 // recv_burst_bytes_per_sec
 					],
 					returns: FFIType.i32
 				},
@@ -216,17 +226,17 @@ class GeofrontWorkerAPI {
 
 	async setRateLimit(
 		connectionId: number,
-		sendAvg: number,
-		sendBurst: number,
-		recvAvg: number,
-		recvBurst: number
+		sendAvgBytes: number,
+		sendBurstBytes: number,
+		recvAvgBytes: number,
+		recvBurstBytes: number
 	) {
 		return symbols.proxy_set_rate_limit(
 			BigInt(connectionId),
-			BigInt(sendAvg),
-			BigInt(sendBurst),
-			BigInt(recvAvg),
-			BigInt(recvBurst)
+			BigInt(sendAvgBytes),
+			BigInt(sendBurstBytes),
+			BigInt(recvAvgBytes),
+			BigInt(recvBurstBytes)
 		)
 	}
 
@@ -251,8 +261,6 @@ class GeofrontWorkerAPI {
 			}
 		}
 	}
-
-	// --- 新增方法 ---
 
 	getConnections() {
 		return { connections: Array.from(activeConnections).map(id => Number(id)) }
@@ -282,8 +290,9 @@ class GeofrontWorkerAPI {
 		return kickedCount
 	}
 
-	clearRouteCache() {
-		// 注意：此功能需要 Rust 端实现
+	async setOptions(options: any) {
+		const jsonOptions = JSON.stringify(options)
+		return symbols.proxy_set_options(Buffer.from(jsonOptions + '\0'))
 	}
 }
 
