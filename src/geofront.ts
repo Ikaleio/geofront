@@ -170,8 +170,18 @@ export class Geofront {
 
 	constructor() {
 		// 创建 Worker 并用 Comlink 包装
-		const tsPath = new URL('./ffi_worker.ts', import.meta.url).pathname
-		const jsPath = new URL('./ffi_worker.js', import.meta.url).pathname
+		const tsUrl = new URL('./ffi_worker.ts', import.meta.url)
+		const jsUrl = new URL('./ffi_worker.js', import.meta.url)
+
+		// 使用 fileURLToPath 或直接使用 URL 对象来处理跨平台路径
+		const tsPath =
+			tsUrl.pathname.startsWith('/') && process.platform === 'win32'
+				? tsUrl.pathname.slice(1)
+				: tsUrl.pathname
+		const jsPath =
+			jsUrl.pathname.startsWith('/') && process.platform === 'win32'
+				? jsUrl.pathname.slice(1)
+				: jsUrl.pathname
 
 		// 先检查 .ts 文件是否存在，否则回落到 .js
 		const workerUrl = existsSync(tsPath) ? tsPath : jsPath
