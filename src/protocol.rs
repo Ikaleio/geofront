@@ -1,7 +1,7 @@
 //! proxy_core/src/protocol.rs
 //! Minecraft protocol parsing and serialization utilities
 
-use crate::HandshakeData;
+use crate::types::HandshakeData;
 use std::io::{Error, ErrorKind, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
