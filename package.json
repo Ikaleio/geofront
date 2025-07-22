@@ -1,6 +1,6 @@
 {
 	"name": "geofront-ts",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"private": false,
 	"description": "A high-performance Minecraft proxy core built with Rust and Bun FFI.",
 	"main": "dist/geofront.js",
