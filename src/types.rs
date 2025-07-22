@@ -101,6 +101,15 @@ pub struct ConnMetrics {
     pub bytes_recv: AtomicU64,
 }
 
+impl Default for ConnMetrics {
+    fn default() -> Self {
+        Self {
+            bytes_sent: AtomicU64::new(0),
+            bytes_recv: AtomicU64::new(0),
+        }
+    }
+}
+
 // Snapshot structs for JSON serialization
 #[derive(Serialize)]
 pub struct MetricsSnapshot {

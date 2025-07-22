@@ -15,11 +15,7 @@ use crate::{
     },
 };
 use ppp::PartialResult;
-use std::{
-    net::SocketAddr,
-    num::NonZeroU32,
-    sync::{atomic::Ordering},
-};
+use std::{net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,

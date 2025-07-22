@@ -167,7 +167,7 @@ where
 
             match res {
                 Ok(size) => {
-                    if self.cap == size {
+                    if size == 0 {
                         self.read_done = true;
                     }
                     self.cap = size;
