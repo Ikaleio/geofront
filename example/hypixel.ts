@@ -86,11 +86,16 @@ async function main() {
 				},
 				0,
 				protocol
-			) // 0 玩家在线（因为这是代理服务器）
+			)
 
 			return motd
 		})
 		console.log('✓ MOTD 回调已设置')
+
+		// 设置断开连接回调
+		geofront.setDisconnectionCallback((connId) => {
+			console.log(`🔌 连接 ${connId} 已断开`)
+		})
 
 		// 启动监听器
 		await geofront.listen(PROXY_HOST, PROXY_PORT)

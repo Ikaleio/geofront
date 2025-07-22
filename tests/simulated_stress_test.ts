@@ -8,7 +8,7 @@ import {
 	getRandomPort
 } from './helpers'
 
-const CLIENT_COUNT = 25 // Reduce client count for stability in CI
+const CLIENT_COUNT = 100
 
 describe('Geofront Stress Test', () => {
 	let geofront: Geofront

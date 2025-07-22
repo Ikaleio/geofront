@@ -62,15 +62,36 @@ pub struct RouteDecision {
     pub rewrite_host: Option<String>,
 }
 
-// Router callback signature.
-pub type ProxyRouterFn = extern "C" fn(
-    ProxyConnection,
-    *const std::os::raw::c_char, // peer_ip
-    std::os::raw::c_ushort,      // port
-    std::os::raw::c_uint,        // protocol
-    *const std::os::raw::c_char, // host
-    *const std::os::raw::c_char, // user
-);
+// Struct for route requests (used in polling API)
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteRequest {
+    pub conn_id: ProxyConnection,
+    pub peer_ip: String,
+    pub port: u16,
+    pub protocol: u32,
+    pub host: String,
+    pub username: String,
+}
+
+// Struct for MOTD requests (used in polling API)
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MotdRequest {
+    pub conn_id: ProxyConnection,
+    pub peer_ip: String,
+    pub port: u16,
+    pub protocol: u32,
+    pub host: String,
+}
+
+// Struct for disconnection events (used in polling API)
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectionEvent {
+    pub conn_id: ProxyConnection,
+}
+
 
 // Per-connection metrics
 #[derive(Serialize)]
@@ -141,15 +162,6 @@ pub struct HandshakeData {
     pub next_state: i32,
 }
 
-// MOTD callback signature - same parameters as router callback
-pub type ProxyMotdFn = extern "C" fn(
-    ProxyConnection,
-    *const std::os::raw::c_char, // peer_ip
-    std::os::raw::c_ushort,      // port
-    std::os::raw::c_uint,        // protocol
-    *const std::os::raw::c_char, // host
-    *const std::os::raw::c_char, // user
-);
 
 // MOTD decision structure
 #[derive(Serialize, Deserialize, Debug, Default)]

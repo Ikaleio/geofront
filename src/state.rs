@@ -2,8 +2,7 @@
 //! Global state management.
 
 use crate::types::{
-    ConnMetrics, ConnectionManager, GeofrontOptions, ListenerState, MotdDecision, ProxyConnection,
-    ProxyMotdFn, ProxyRouterFn, RouteDecision,
+    ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState, MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
 };
 use governor::{
     RateLimiter,
@@ -34,6 +33,15 @@ lazy_static! {
     // Map to hold the senders for pending MOTD decisions
     pub static ref PENDING_MOTDS: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<MotdDecision>>> =
         std::sync::Mutex::new(HashMap::new());
+    
+    // Thread-safe queues for polling-based approach (alternative to callbacks)
+    pub static ref ROUTE_REQUEST_QUEUE: std::sync::Mutex<Vec<RouteRequest>> =
+        std::sync::Mutex::new(Vec::new());
+    pub static ref MOTD_REQUEST_QUEUE: std::sync::Mutex<Vec<MotdRequest>> =
+        std::sync::Mutex::new(Vec::new());
+    pub static ref DISCONNECTION_EVENT_QUEUE: std::sync::Mutex<Vec<DisconnectionEvent>> =
+        std::sync::Mutex::new(Vec::new());
+        
     pub static ref LISTENER_STATE: Arc<std::sync::Mutex<ListenerState>> =
         Arc::new(std::sync::Mutex::new(ListenerState::new()));
     pub static ref CONN_MANAGER: Arc<std::sync::Mutex<ConnectionManager>> =
@@ -51,12 +59,10 @@ lazy_static! {
     pub static ref CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
     pub static ref RELOAD_HANDLE: std::sync::Mutex<Option<ReloadHandle<EnvFilter, tracing_subscriber::Registry>>> =
         std::sync::Mutex::new(None);
-    pub static ref ROUTER_CALLBACK: std::sync::Mutex<Option<ProxyRouterFn>> =
-        std::sync::Mutex::new(None);
-    pub static ref MOTD_CALLBACK: std::sync::Mutex<Option<ProxyMotdFn>> =
-        std::sync::Mutex::new(None);
     // This lock serializes all FFI calls to the router to prevent concurrency issues.
     pub static ref FFI_ROUTER_LOCK: Mutex<()> = Mutex::new(());
     // This lock serializes all FFI calls to the MOTD callback to prevent concurrency issues.
     pub static ref FFI_MOTD_LOCK: Mutex<()> = Mutex::new(());
+    // This lock serializes all FFI calls to the disconnection callback to prevent concurrency issues.
+    pub static ref FFI_DISCONNECTION_LOCK: Mutex<()> = Mutex::new(());
 }

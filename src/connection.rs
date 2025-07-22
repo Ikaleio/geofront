@@ -4,16 +4,18 @@
 use crate::{
     protocol::{self, write_disconnect},
     state::{
-        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, FFI_MOTD_LOCK, FFI_ROUTER_LOCK, MOTD_CALLBACK,
-        OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, ROUTER_CALLBACK, TOTAL_BYTES_RECV,
-        TOTAL_BYTES_SENT,
+        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE,
+        FFI_MOTD_LOCK, FFI_ROUTER_LOCK, MOTD_REQUEST_QUEUE,
+        OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, ROUTE_REQUEST_QUEUE,
+        TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
     },
     types::{
-        AsyncStream, HandshakeData, MotdDecision, ProxyConnection, ProxyProtocolIn, RouteDecision,
+        AsyncStream, DisconnectionEvent, HandshakeData, MotdDecision, MotdRequest, ProxyConnection, 
+        ProxyProtocolIn, RouteDecision, RouteRequest,
     },
 };
 use ppp::PartialResult;
-use std::{ffi::CString, net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
+use std::{net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -341,6 +343,13 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
 
 /// Cleanup resources for a connection
 fn cleanup_conn(conn_id: ProxyConnection) {
+    // Add to disconnection event queue (thread-safe alternative)
+    let disconnection_event = DisconnectionEvent { conn_id };
+    DISCONNECTION_EVENT_QUEUE.lock().unwrap().push(disconnection_event);
+
+    // The new polling mechanism handles disconnection events.
+    // No need to manually call a callback here.
+
     CONN_MANAGER.lock().unwrap().remove(&conn_id);
     RATE_LIMITERS.lock().unwrap().remove(&conn_id);
     CONN_METRICS.lock().unwrap().remove(&conn_id);
@@ -490,36 +499,18 @@ async fn get_route_info(
 
 /// Fires off the FFI call to JS to request a routing decision.
 /// This function is synchronous and does not wait for a response.
+/// Also adds the request to a queue for polling-based approach.
 fn request_route_info(conn_id: ProxyConnection, hs: &HandshakeData, username: &str, peer_ip: &str) {
-    let cb = match *ROUTER_CALLBACK.lock().unwrap() {
-        Some(cb) => cb,
-        None => {
-            error!("Router callback is not registered, disconnecting.");
-            // If no callback, we can immediately send a disconnect decision.
-            if let Some(sender) = PENDING_ROUTES.lock().unwrap().remove(&conn_id) {
-                let _ = sender.send(RouteDecision {
-                    disconnect: Some("No router configured".to_string()),
-                    ..Default::default()
-                });
-            }
-            return;
-        }
-    };
-
-    // These CStrings are now owned by this function and will be freed
-    // by JS using `proxy_free_string`.
-    let peer_ip_ptr = CString::new(peer_ip).unwrap().into_raw();
-    let host_ptr = CString::new(hs.host.clone()).unwrap().into_raw();
-    let username_ptr = CString::new(username).unwrap().into_raw();
-
-    cb(
+    // Add to polling queue
+    let route_request = RouteRequest {
         conn_id,
-        peer_ip_ptr,
-        hs.port,
-        hs.protocol_version as u32,
-        host_ptr,
-        username_ptr,
-    );
+        peer_ip: peer_ip.to_string(),
+        port: hs.port,
+        protocol: hs.protocol_version as u32,
+        host: hs.host.clone(),
+        username: username.to_string(),
+    };
+    ROUTE_REQUEST_QUEUE.lock().unwrap().push(route_request);
 }
 
 /// --- Packet Serialization Helpers ---
@@ -767,46 +758,16 @@ async fn get_motd_info(
 
 /// Fires off the FFI call to JS to request an MOTD decision.
 /// This function is synchronous and does not wait for a response.
+/// Also adds the request to a queue for polling-based approach.
 fn request_motd_info(conn_id: ProxyConnection, hs: &HandshakeData, peer_ip: &str) {
-    let cb = match *MOTD_CALLBACK.lock().unwrap() {
-        Some(cb) => cb,
-        None => {
-            error!("MOTD callback is not registered, using default MOTD.");
-            // If no callback, we can immediately send a default MOTD decision.
-            if let Some(sender) = PENDING_MOTDS.lock().unwrap().remove(&conn_id) {
-                let _ = sender.send(MotdDecision {
-                    version: Some(crate::types::MotdVersion {
-                        name: "Geofront".to_string(),
-                        protocol: hs.protocol_version,
-                    }),
-                    players: Some(crate::types::MotdPlayers {
-                        max: 20,
-                        online: 0,
-                        sample: vec![],
-                    }),
-                    description: Some(serde_json::json!({
-                        "text": "Geofront Proxy - No MOTD callback configured"
-                    })),
-                    favicon: None,
-                    disconnect: None,
-                });
-            }
-            return;
-        }
-    };
-
-    // These CStrings are now owned by this function and will be freed
-    // by JS using `proxy_free_string`.
-    let peer_ip_ptr = CString::new(peer_ip).unwrap().into_raw();
-    let host_ptr = CString::new(hs.host.clone()).unwrap().into_raw();
-    let username_ptr = CString::new("").unwrap().into_raw(); // Empty username for status requests
-
-    cb(
+    // Add to polling queue
+    let motd_request = MotdRequest {
         conn_id,
-        peer_ip_ptr,
-        hs.port,
-        hs.protocol_version as u32,
-        host_ptr,
-        username_ptr,
-    );
+        peer_ip: peer_ip.to_string(),
+        port: hs.port,
+        protocol: hs.protocol_version as u32,
+        host: hs.host.clone(),
+    };
+    MOTD_REQUEST_QUEUE.lock().unwrap().push(motd_request);
+    info!(conn = conn_id, "MOTD request queued for polling.");
 }

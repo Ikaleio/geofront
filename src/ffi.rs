@@ -5,14 +5,17 @@ use crate::{
     connection::handle_conn,
     logging,
     state::{
-        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, LISTENER_COUNTER, LISTENER_STATE,
-        MOTD_CALLBACK, OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE,
-        ROUTER_CALLBACK, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, TOTAL_CONN,
+        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS,
+        DISCONNECTION_EVENT_QUEUE, LISTENER_COUNTER, LISTENER_STATE,
+        MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS, PENDING_ROUTES,
+        RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE,
+        TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, TOTAL_CONN,
     },
     types::{
-        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, MotdDecision,
-        PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND, PROXY_OK, ProxyConnection,
-        ProxyError, ProxyListener, ProxyMotdFn, ProxyRouterFn, RouteDecision,
+        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot,
+        MotdDecision, PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND,
+        PROXY_OK, ProxyConnection, ProxyError, ProxyListener,
+        RouteDecision,
     },
 };
 use governor::{Quota, RateLimiter};
@@ -88,15 +91,6 @@ pub unsafe extern "C" fn proxy_set_log_level(level: *const c_char) -> ProxyError
     }
 }
 
-/// Register router callback (must set before start)
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn proxy_register_router(cb: ProxyRouterFn) -> ProxyError {
-    logging::init_logging("info");
-    let mut router_cb_guard = ROUTER_CALLBACK.lock().unwrap();
-    *router_cb_guard = Some(cb);
-    info!("Router callback registered");
-    PROXY_OK
-}
 
 /// Submits the routing decision from JS back to Rust.
 #[unsafe(no_mangle)]
@@ -142,15 +136,7 @@ pub unsafe extern "C" fn proxy_submit_routing_decision(
     PROXY_OK
 }
 
-/// Register MOTD callback (must set before start)
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn proxy_register_motd(cb: ProxyMotdFn) -> ProxyError {
-    logging::init_logging("info");
-    let mut motd_cb_guard = MOTD_CALLBACK.lock().unwrap();
-    *motd_cb_guard = Some(cb);
-    info!("MOTD callback registered");
-    PROXY_OK
-}
+
 
 /// Submits the MOTD decision from JS back to Rust.
 #[unsafe(no_mangle)]
@@ -277,6 +263,11 @@ pub unsafe extern "C" fn proxy_stop_listener(listener: ProxyListener) -> ProxyEr
 pub unsafe extern "C" fn proxy_disconnect(conn_id: ProxyConnection) -> ProxyError {
     if let Some(h) = CONN_MANAGER.lock().unwrap().remove(&conn_id) {
         h.abort();
+
+        // Call disconnection callback if registered
+        // The new polling mechanism handles disconnection events.
+        // No need to manually call a callback here.
+
         RATE_LIMITERS.lock().unwrap().remove(&conn_id);
         CONN_METRICS.lock().unwrap().remove(&conn_id);
         ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
@@ -335,9 +326,15 @@ pub unsafe extern "C" fn proxy_shutdown() -> ProxyError {
     {
         h.abort();
     }
+
     for (_, h) in CONN_MANAGER.lock().unwrap().connections.drain() {
         h.abort();
     }
+
+    // Call disconnection callback for each connection
+    // The new polling mechanism handles disconnection events.
+    // No need to manually call callbacks here.
+
     CONN_METRICS.lock().unwrap().clear();
     PROXY_OK
 }
@@ -357,6 +354,10 @@ pub unsafe extern "C" fn proxy_kick_all() -> c_uint {
         conn_metrics.remove(&conn_id);
         ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
     }
+
+    // Call disconnection callback for each kicked connection
+    // The new polling mechanism handles disconnection events.
+    // No need to manually call callbacks here.
 
     kicked_count as c_uint
 }
@@ -425,5 +426,65 @@ pub unsafe extern "C" fn proxy_free_string(s: *mut c_char) {
         unsafe {
             let _ = CString::from_raw(s);
         }
+    }
+}
+
+/// Alternative thread-safe approach: Poll for pending route requests
+/// Returns NULL if no pending requests, otherwise returns JSON with request info
+/// The caller is responsible for freeing the returned string using `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_poll_route_request() -> *const c_char {
+    let mut queue = ROUTE_REQUEST_QUEUE.lock().unwrap();
+    if queue.is_empty() {
+        return ptr::null();
+    }
+    
+    let request = queue.remove(0);
+    match serde_json::to_string(&request) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Alternative thread-safe approach: Poll for pending MOTD requests
+/// Returns NULL if no pending requests, otherwise returns JSON with request info
+/// The caller is responsible for freeing the returned string using `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_poll_motd_request() -> *const c_char {
+    let mut queue = MOTD_REQUEST_QUEUE.lock().unwrap();
+    if queue.is_empty() {
+        return ptr::null();
+    }
+    
+    let request = queue.remove(0);
+    match serde_json::to_string(&request) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Alternative thread-safe approach: Poll for disconnection events
+/// Returns NULL if no pending events, otherwise returns JSON with disconnection info
+/// The caller is responsible for freeing the returned string using `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_poll_disconnection_event() -> *const c_char {
+    let mut queue = DISCONNECTION_EVENT_QUEUE.lock().unwrap();
+    if queue.is_empty() {
+        return ptr::null();
+    }
+    
+    let event = queue.remove(0);
+    match serde_json::to_string(&event) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
     }
 }
