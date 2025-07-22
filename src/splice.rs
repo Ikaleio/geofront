@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
 use std::future::poll_fn;
@@ -5,7 +6,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use libc;
 use tokio::io::{AsyncRead, AsyncWrite, Interest};

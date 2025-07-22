@@ -1,8 +1,8 @@
 # 🌍 Geofront
 
-[![npm version](https://img.shields.io/npm/v/geofront.svg)](https://www.npmjs.com/package/geofront)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/<YOUR_GITHUB_USERNAME>/geofront/release.yml)](https://github.com/<YOUR_GITHUB_USERNAME>/geofront/actions)
-[![License](https://img.shields.io/npm/l/geofront.svg)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/geofront-ts.svg)](https://www.npmjs.com/package/geofront-ts)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/Ikaleio/geofront/release.yml)](https://github.com/Ikaleio/geofront/actions)
+[![License](https://img.shields.io/npm/l/geofront-ts.svg)](./LICENSE)
 
 **Geofront 是一个为 Minecraft 设计的高性能、可编程的入口代理核心，采用 Rust 编写，并通过 Bun FFI 与 TypeScript/JavaScript 无缝集成。**
 
@@ -33,7 +33,6 @@ bun install geofront-ts
 ```typescript
 // server.ts
 import { Geofront } from 'geofront-ts'
-
 ;(async () => {
 	try {
 		const proxy = new Geofront()
@@ -81,7 +80,6 @@ bun run server.ts
 ```typescript
 // server.ts
 import { Geofront } from 'geofront-ts'
-
 ;(async () => {
 	try {
 		const proxy = new Geofront()
@@ -146,33 +144,33 @@ Geofront 的主类，用于管理代理实例。
 
 在指定的 `host` 和 `port` 上启动一个新的监听器。
 
--   返回: `Promise<{ code: number, listenerId: number }>`
+- 返回: `Promise<{ code: number, listenerId: number }>`
 
 #### `geofront.setRouter(callback)`
 
 设置路由回调函数。对于每个新的连接，此回调函数都会被调用以决定如何处理它。
 
--   `callback(ip: string, host: string, player: string, protocol: number): RouterResult`
-    -   `ip`: 客户端 IP 地址。
-    -   `host`: 玩家连接时使用的主机名。
-    -   `player`: 玩家的 Minecraft 用户名 (如果可用)。
-    -   `protocol`: 玩家使用的 Minecraft 协议版本号。
-    -   返回值 `RouterResult`:
-        -   `{ remoteHost: string, remotePort: number, ... }`: 允许连接并将其路由到指定的后端服务器。
-        -   `{ disconnect: string }`: 拒绝连接并向玩家显示指定的消息。
+- `callback(ip: string, host: string, player: string, protocol: number): RouterResult`
+  - `ip`: 客户端 IP 地址。
+  - `host`: 玩家连接时使用的主机名。
+  - `player`: 玩家的 Minecraft 用户名 (如果可用)。
+  - `protocol`: 玩家使用的 Minecraft 协议版本号。
+  - 返回值 `RouterResult`:
+    - `{ remoteHost: string, remotePort: number, ... }`: 允许连接并将其路由到指定的后端服务器。
+    - `{ disconnect: string }`: 拒绝连接并向玩家显示指定的消息。
 
 #### `geofront.setMotdCallback(callback)`
 
 设置服务器列表 ping (MOTD) 的回调函数。
 
--   `callback(ip: string, host: string, protocol: number): MotdResult`
-    -   返回一个 `MotdResult` 对象来动态生成服务器信息。
+- `callback(ip: string, host: string, protocol: number): MotdResult`
+  - 返回一个 `MotdResult` 对象来动态生成服务器信息。
 
 #### `geofront.setDisconnectionCallback(callback)`
 
 设置一个在连接断开时触发的回调函数。
 
--   `callback(connId: number)`
+- `callback(connId: number)`
 
 #### `async geofront.shutdown()`
 
@@ -182,7 +180,7 @@ Geofront 的主类，用于管理代理实例。
 
 为所有**未来**的连接设置全局速率限制。
 
--   `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
+- `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
 
 #### `async geofront.kickAll()`
 
@@ -198,7 +196,7 @@ Geofront 的主类，用于管理代理实例。
 
 ```typescript
 for await (const conn of geofront.connections()) {
-  console.log(`Active connection: ${conn.id}`);
+	console.log(`Active connection: ${conn.id}`)
 }
 ```
 
@@ -224,7 +222,7 @@ for await (const conn of geofront.connections()) {
 
 为此特定连接设置速率限制。
 
--   `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
+- `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
 
 #### `async connection.kick()`
 

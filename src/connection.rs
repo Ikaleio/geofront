@@ -4,13 +4,12 @@
 use crate::{
     protocol::{self, write_disconnect},
     state::{
-        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE,
-        FFI_MOTD_LOCK, FFI_ROUTER_LOCK, MOTD_REQUEST_QUEUE,
-        OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, ROUTE_REQUEST_QUEUE,
-        TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
+        ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE, FFI_MOTD_LOCK,
+        FFI_ROUTER_LOCK, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS,
+        ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
     },
     types::{
-        AsyncStream, DisconnectionEvent, HandshakeData, MotdDecision, MotdRequest, ProxyConnection, 
+        AsyncStream, DisconnectionEvent, HandshakeData, MotdDecision, MotdRequest, ProxyConnection,
         ProxyProtocolIn, RouteDecision, RouteRequest,
     },
 };
@@ -345,7 +344,10 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
 fn cleanup_conn(conn_id: ProxyConnection) {
     // Add to disconnection event queue (thread-safe alternative)
     let disconnection_event = DisconnectionEvent { conn_id };
-    DISCONNECTION_EVENT_QUEUE.lock().unwrap().push(disconnection_event);
+    DISCONNECTION_EVENT_QUEUE
+        .lock()
+        .unwrap()
+        .push(disconnection_event);
 
     // The new polling mechanism handles disconnection events.
     // No need to manually call a callback here.
@@ -361,7 +363,7 @@ fn cleanup_conn(conn_id: ProxyConnection) {
 async fn copy_bidirectional_with_metrics(
     conn_id: ProxyConnection,
     inbound: &mut TcpStream,
-    outbound: &mut (dyn AsyncRead + AsyncWrite + Unpin),
+    outbound: &mut Box<AsyncStream>,
 ) -> Result<(u64, u64), std::io::Error> {
     copy_bidirectional_fallback(conn_id, inbound, outbound).await
 }
@@ -385,12 +387,8 @@ async fn copy_bidirectional_with_metrics(
         // Update metrics
         let conn_metrics = CONN_METRICS.lock().unwrap().get(&conn_id).cloned();
         if let Some(metrics) = conn_metrics {
-            metrics
-                .bytes_sent
-                .fetch_add(a_to_b, Ordering::SeqCst);
-            metrics
-                .bytes_recv
-                .fetch_add(b_to_a, Ordering::SeqCst);
+            metrics.bytes_sent.fetch_add(a_to_b, Ordering::SeqCst);
+            metrics.bytes_recv.fetch_add(b_to_a, Ordering::SeqCst);
             TOTAL_BYTES_SENT.fetch_add(a_to_b, Ordering::SeqCst);
             TOTAL_BYTES_RECV.fetch_add(b_to_a, Ordering::SeqCst);
         }
