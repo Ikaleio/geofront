@@ -1,19 +1,10 @@
-// 主线程 API：通过 Comlink 与 Worker 通信
-import { wrap, proxy, releaseProxy } from "comlink";
-import type { Remote } from "comlink";
-import { existsSync } from "fs";
+// Geofront: 主 API 和 FFI 实现
 import { z } from "zod";
 import type { MotdResult, MotdType } from "./motd";
-import { MotdSchema, buildMotd } from "./motd";
-
-export interface RouteEvent {
-  connId: bigint;
-  peerIpPtr: number;
-  port: number;
-  protocol: number;
-  hostPtr: number;
-  userPtr: number;
-}
+import { buildMotd } from "./motd";
+import { CString, dlopen, FFIType, type Pointer } from "bun:ffi";
+import { platform } from "os";
+import { join } from "path";
 
 export type RouterResult =
   | {
@@ -58,65 +49,22 @@ export interface GlobalMetrics {
   active_conn: number;
   total_bytes_sent: number;
   total_bytes_recv: number;
+  connections: Record<string, ConnectionMetrics>;
 }
 
-// Worker API 类型定义
-interface GeofrontWorkerAPI {
-  initialize(): Promise<{ ok: boolean }>;
-  setOptions(options: GeofrontOptions): Promise<number>;
-  startListener(
-    addr: string,
-    port: number
-  ): Promise<{ code: number; listenerId: number }>;
-  stopListener(listenerId: number): Promise<number>;
-  disconnect(connectionId: number): Promise<number>;
-  setRateLimit(
-    connectionId: number,
-    sendAvgBytes: number,
-    sendBurstBytes: number,
-    recvAvgBytes: number,
-    recvBurstBytes: number
-  ): Promise<number>;
-  getMetrics(): Promise<GlobalMetrics>;
-  getConnections(): Promise<{ connections: number[] }>;
-  getConnectionMetrics(connectionId: number): Promise<ConnectionMetrics>;
-  kickAll(): Promise<number>;
-  shutdown(): Promise<number>;
-  setRouterCallback(
-    callback: (
-      connId: bigint,
-      peerIp: string,
-      port: number,
-      protocol: number,
-      host: string,
-      user: string
-    ) => Promise<RouterResult> // Returns the result object
-  ): void;
-  setMotdCallback(
-    callback: (
-      connId: bigint,
-      peerIp: string,
-      port: number,
-      protocol: number,
-      host: string,
-      user: string // For MOTD requests, this will be empty string ""
-    ) => Promise<any> // Returns the MOTD object
-  ): void;
-  setDisconnectionCallback(callback: (connId: bigint) => void): void;
-  clearRouteCache(): void;
-}
+// FFI 符号 - 在 initialize 中加载
+let symbols: any = null;
+
+// 存储活动连接 ID
+const activeConnections = new Set<bigint>();
 
 export class Connection {
-  private workerApi: Remote<GeofrontWorkerAPI>;
+  private geofront: Geofront;
   private _id: number;
   public when: number;
 
-  constructor(
-    workerApi: Remote<GeofrontWorkerAPI>,
-    connId: number,
-    when: number
-  ) {
-    this.workerApi = workerApi;
+  constructor(geofront: Geofront, connId: number, when: number) {
+    this.geofront = geofront;
     this._id = connId;
     this.when = when;
   }
@@ -126,12 +74,12 @@ export class Connection {
   }
 
   get metrics(): Promise<ConnectionMetrics> {
-    return this.workerApi.getConnectionMetrics(this._id);
+    return this.geofront.getConnectionMetrics(this._id);
   }
 
   async limit(opts: LimitOpts) {
     const parsed = limitSchema.parse(opts);
-    return this.workerApi.setRateLimit(
+    return this.geofront.setRateLimit(
       this._id,
       parsed.sendAvgBytes ?? 0,
       parsed.sendBurstBytes ?? parsed.sendAvgBytes ?? 0,
@@ -141,13 +89,11 @@ export class Connection {
   }
 
   async kick() {
-    return this.workerApi.disconnect(this._id);
+    return this.geofront.disconnect(this._id);
   }
 }
 
 export class Geofront {
-  private worker: Worker;
-  public workerApi: Remote<GeofrontWorkerAPI>; // Made public for testing
   private routerCallback?: (
     ip: string,
     host: string,
@@ -165,51 +111,118 @@ export class Geofront {
   private globalLimit: LimitOpts = {};
   private initialized = false;
   private shutdownInProgress = false;
-  private workerTerminated = false;
   public metrics: GlobalMetrics;
 
+  private pollingInterval: Timer | null = null;
+  private pollingEnabled = false;
+  private polling = false;
+
   constructor() {
-    // 创建 Worker 并用 Comlink 包装
-    const tsUrl = new URL("./ffi_worker.ts", import.meta.url);
-    const jsUrl = new URL("./ffi_worker.js", import.meta.url);
-
-    // 使用 fileURLToPath 或直接使用 URL 对象来处理跨平台路径
-    const tsPath =
-      tsUrl.pathname.startsWith("/") && process.platform === "win32"
-        ? tsUrl.pathname.slice(1)
-        : tsUrl.pathname;
-    const jsPath =
-      jsUrl.pathname.startsWith("/") && process.platform === "win32"
-        ? jsUrl.pathname.slice(1)
-        : jsUrl.pathname;
-
-    // 先检查 .ts 文件是否存在，否则回落到 .js
-    const workerUrl = existsSync(tsPath) ? tsPath : jsPath;
-
-    if (!existsSync(workerUrl)) {
-      // 如果什么都不干，它会静默退出难以调试
-      throw new Error(`Worker file not found: ${workerUrl}`);
-    }
-
-    this.worker = new Worker(workerUrl, { type: "module" });
-    this.workerApi = wrap<GeofrontWorkerAPI>(this.worker);
-
     this.metrics = {
       total_conn: 0,
       active_conn: 0,
       total_bytes_sent: 0,
       total_bytes_recv: 0,
+      connections: {},
     };
   }
 
   async initialize() {
     if (this.initialized) {
-      throw new Error("Geofront worker is already initialized");
+      return;
     }
-    const result = await this.workerApi.initialize();
-    this.initialized = result.ok;
-    if (!result.ok) {
-      throw new Error("Failed to initialize Geofront worker");
+    try {
+      // --- 动态加载 FFI 库 ---
+      let libPath: string;
+      const libName = "geofront";
+      const isDev = process.env.NODE_ENV === "development";
+      const rootDir = isDev
+        ? join(import.meta.dir, "..", "target", "debug")
+        : join(import.meta.dir, "..", "dist");
+
+      switch (platform()) {
+        case "darwin":
+          libPath = join(rootDir, `lib${libName}.dylib`);
+          break;
+        case "win32":
+          libPath = join(rootDir, `${libName}.dll`);
+          break;
+        default:
+          libPath = join(rootDir, `lib${libName}.so`);
+          break;
+      }
+
+      if (isDev) {
+        console.log(
+          `[WARN] Development mode: Loading FFI library from: ${libPath}`
+        );
+      }
+
+      const { symbols: ffiSymbols } = dlopen(libPath, {
+        proxy_set_options: {
+          args: [FFIType.cstring],
+          returns: FFIType.i32,
+        },
+        proxy_submit_routing_decision: {
+          args: [FFIType.u64, FFIType.cstring],
+          returns: FFIType.i32,
+        },
+        proxy_submit_motd_decision: {
+          args: [FFIType.u64, FFIType.cstring],
+          returns: FFIType.i32,
+        },
+        proxy_start_listener: {
+          args: [FFIType.cstring, FFIType.u16, FFIType.ptr],
+          returns: FFIType.i32,
+        },
+        proxy_stop_listener: { args: [FFIType.u64], returns: FFIType.i32 },
+        proxy_disconnect: { args: [FFIType.u64], returns: FFIType.i32 },
+        proxy_set_rate_limit: {
+          args: [
+            FFIType.u64, // connId
+            FFIType.u64, // send_avg_bytes_per_sec
+            FFIType.u64, // send_burst_bytes_per_sec
+            FFIType.u64, // recv_avg_bytes_per_sec
+            FFIType.u64, // recv_burst_bytes_per_sec
+          ],
+          returns: FFIType.i32,
+        },
+        proxy_shutdown: { args: [], returns: FFIType.i32 },
+        proxy_kick_all: { args: [], returns: FFIType.u32 },
+        proxy_get_metrics: {
+          args: [],
+          returns: FFIType.pointer,
+        },
+        proxy_get_connection_metrics: {
+          args: [FFIType.u64],
+          returns: FFIType.pointer,
+        },
+        proxy_free_string: {
+          args: [FFIType.ptr],
+          returns: FFIType.void,
+        },
+        proxy_poll_route_request: {
+          args: [],
+          returns: FFIType.pointer,
+        },
+        proxy_poll_motd_request: {
+          args: [],
+          returns: FFIType.pointer,
+        },
+        proxy_poll_disconnection_event: {
+          args: [],
+          returns: FFIType.pointer,
+        },
+      });
+      symbols = ffiSymbols;
+
+      // 启动轮询
+      this.enablePolling(10);
+
+      this.initialized = true;
+    } catch (e) {
+      console.error("Failed to initialize Geofront:", e);
+      throw e;
     }
   }
 
@@ -226,11 +239,9 @@ export class Geofront {
     } else {
       result = this.routerCallback(peerIp, host, user, protocol);
 
-      // Only create a connection object if the decision is NOT to disconnect
       if (!("disconnect" in result)) {
-        const conn = new Connection(this.workerApi, Number(connId), Date.now());
+        const conn = new Connection(this, Number(connId), Date.now());
         this.connectionMap.set(Number(connId), conn);
-        // Apply global limit to new connection
         if (Object.keys(this.globalLimit).length > 0) {
           conn.limit(this.globalLimit);
         }
@@ -246,9 +257,7 @@ export class Geofront {
     host: string,
     user: string
   ): Promise<MotdResult> {
-    let result: MotdResult;
     if (!this.motdCallback) {
-      // Default MOTD when no callback is configured
       const defaultMotd: MotdType = {
         version: { name: "Geofront", protocol: protocol },
         players: { max: 20, online: 0, sample: [] },
@@ -256,20 +265,15 @@ export class Geofront {
         favicon:
           "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
       };
-      result = buildMotd(defaultMotd, 0, protocol);
+      return buildMotd(defaultMotd, 0, protocol);
     } else {
-      result = this.motdCallback(peerIp, host, protocol);
+      return this.motdCallback(peerIp, host, protocol);
     }
-    return result;
   }
 
   private handleDisconnection(connId: bigint): void {
     const numConnId = Number(connId);
-
-    // Remove from connection map
     this.connectionMap.delete(numConnId);
-
-    // Call user-defined disconnection callback if registered
     if (this.disconnectionCallback) {
       try {
         this.disconnectionCallback(numConnId);
@@ -281,20 +285,26 @@ export class Geofront {
 
   async listen(host: string, port: number) {
     if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
+      throw new Error("Geofront is not initialized");
     }
-    const result = await this.workerApi.startListener(host, port);
-    this.listenerId = result.listenerId;
+    const buf = new ArrayBuffer(8);
+    const code = symbols.proxy_start_listener(
+      Buffer.from(host + "\0"),
+      port,
+      buf as any
+    );
+    const listenerId = new DataView(buf).getBigUint64(0, true);
+    this.listenerId = Number(listenerId);
     await this.updateMetrics();
-    return result;
+    return { code, listenerId: this.listenerId };
   }
 
   async updateMetrics() {
     if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
+      throw new Error("Geofront is not initialized");
     }
     try {
-      this.metrics = await this.workerApi.getMetrics();
+      this.metrics = await this.getMetrics();
     } catch (error) {
       throw new Error(`Failed to update metrics: ${error}`);
     }
@@ -309,79 +319,119 @@ export class Geofront {
     ) => RouterResult
   ) {
     if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
+      throw new Error("Geofront is not initialized");
     }
     this.routerCallback = callback;
-
-    // Use Comlink.proxy to pass the callback function
-    const proxyCallback = proxy(
-      async (
-        connId: bigint,
-        peerIp: string,
-        _port: number,
-        protocol: number,
-        host: string,
-        user: string
-      ): Promise<RouterResult> => {
-        return this.handleRoute(connId, peerIp, protocol, host, user);
-      }
-    );
-
-    this.workerApi.setRouterCallback(proxyCallback as any);
   }
 
   setMotdCallback(
     callback: (ip: string, host: string, protocol: number) => MotdResult
   ) {
     if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
+      throw new Error("Geofront is not initialized");
     }
     this.motdCallback = callback;
-
-    // Use Comlink.proxy to pass the callback function
-    const proxyCallback = proxy(
-      async (
-        connId: bigint,
-        peerIp: string,
-        _port: number,
-        protocol: number,
-        host: string,
-        user: string
-      ): Promise<MotdResult> => {
-        return this.handleMotd(connId, peerIp, protocol, host, user);
-      }
-    );
-
-    this.workerApi.setMotdCallback(proxyCallback as any);
   }
 
   setDisconnectionCallback(callback: (connId: number) => void) {
     if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
+      throw new Error("Geofront is not initialized");
     }
     this.disconnectionCallback = callback;
-
-    // Use Comlink.proxy to pass the callback function
-    const proxyCallback = proxy((connId: bigint): void => {
-      return this.handleDisconnection(connId);
-    });
-
-    this.workerApi.setDisconnectionCallback(proxyCallback as any);
   }
 
+  async stopListener(listenerId: number) {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    return symbols.proxy_stop_listener(BigInt(listenerId));
+  }
+
+  async disconnect(connectionId: number) {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    activeConnections.delete(BigInt(connectionId));
+    return symbols.proxy_disconnect(BigInt(connectionId));
+  }
+
+  async setRateLimit(
+    connectionId: number,
+    sendAvgBytes: number,
+    sendBurstBytes: number,
+    recvAvgBytes: number,
+    recvBurstBytes: number
+  ) {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    return symbols.proxy_set_rate_limit(
+      BigInt(connectionId),
+      BigInt(sendAvgBytes),
+      BigInt(sendBurstBytes),
+      BigInt(recvAvgBytes),
+      BigInt(recvBurstBytes)
+    );
+  }
+
+  async getMetrics(): Promise<GlobalMetrics> {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    let metricsPtr;
+    try {
+      metricsPtr = symbols.proxy_get_metrics();
+      if (metricsPtr === 0) {
+        return {
+          total_conn: 0,
+          active_conn: 0,
+          total_bytes_sent: 0,
+          total_bytes_recv: 0,
+          connections: {},
+        };
+      }
+      const metricsJson = new CString(metricsPtr);
+      return JSON.parse(metricsJson.toString());
+    } finally {
+      if (metricsPtr) {
+        symbols.proxy_free_string(metricsPtr);
+      }
+    }
+  }
+
+  getConnections() {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    return {
+      connections: Array.from(activeConnections).map((id) => Number(id)),
+    };
+  }
+
+  async getConnectionMetrics(connectionId: number): Promise<ConnectionMetrics> {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    let metricsPtr;
+    try {
+      metricsPtr = symbols.proxy_get_connection_metrics(BigInt(connectionId));
+      if (metricsPtr === 0) {
+        return { bytes_sent: 0, bytes_recv: 0 };
+      }
+      const metricsJson = new CString(metricsPtr);
+      return JSON.parse(metricsJson.toString());
+    } finally {
+      if (metricsPtr) {
+        symbols.proxy_free_string(metricsPtr);
+      }
+    }
+  }
+
+  async kickAll() {
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    const kickedCount = symbols.proxy_kick_all();
+    activeConnections.clear();
+    return kickedCount;
+  }
 
   async limit(opts: LimitOpts) {
-    if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
-    }
+    if (!this.initialized) throw new Error("Geofront is not initialized");
     const parsed = limitSchema.parse(opts);
     this.globalLimit = parsed;
 
-    const connections = await this.workerApi.getConnections();
+    const connections = this.getConnections();
     const promises = [];
     for (const connId of connections.connections) {
       promises.push(
-        this.workerApi.setRateLimit(
+        this.setRateLimit(
           connId,
           parsed.sendAvgBytes ?? 0,
           parsed.sendBurstBytes ?? parsed.sendAvgBytes ?? 0,
@@ -393,216 +443,205 @@ export class Geofront {
     await Promise.all(promises);
   }
 
-  async kickall() {
-    if (!this.initialized) {
-      throw new Error("Geofront worker is not initialized");
-    }
-    await this.workerApi.kickAll();
-    this.connectionMap.clear();
-    await this.updateMetrics();
-  }
-
-  /**
-   * 设置 Geofront 全局选项
-   * @param options 选项配置对象
-   * @returns 操作结果状态码 (0 表示成功)
-   */
   async setOptions(options: GeofrontOptions): Promise<number> {
-    if (!this.initialized || this.workerTerminated) {
-      throw new Error(
-        "Geofront worker is not initialized or has been terminated"
-      );
-    }
-
-    // 使用 Zod 验证和标准化选项
+    if (!this.initialized) throw new Error("Geofront is not initialized");
     const validatedOptions = geofrontOptionsSchema.parse(options);
-
-    // 调用 worker API 设置选项
-    try {
-      return await Promise.race([
-        this.workerApi.setOptions(validatedOptions),
-        new Promise<number>((_, reject) =>
-          setTimeout(() => reject(new Error("setOptions 操作超时")), 5000)
-        ),
-      ]);
-    } catch (err: any) {
-      const isWorkerError =
-        err?.message?.includes("Worker has been terminated") ||
-        err?.message?.includes("InvalidStateError") ||
-        err?.message?.includes("Worker is terminated");
-
-      if (isWorkerError) {
-        this.workerTerminated = true;
-        throw new Error("Worker has been terminated");
-      }
-      throw err;
-    }
+    const jsonOptions = JSON.stringify(validatedOptions);
+    return symbols.proxy_set_options(Buffer.from(jsonOptions + "\0"));
   }
 
   async *connections(): AsyncGenerator<Connection> {
-    if (!this.initialized || this.workerTerminated) {
-      throw new Error(
-        "Geofront worker is not initialized or has been terminated"
-      );
-    }
-    try {
-      const result = await Promise.race([
-        this.workerApi.getConnections(),
-        new Promise<{ connections: number[] }>((_, reject) =>
-          setTimeout(() => reject(new Error("getConnections 操作超时")), 3000)
-        ),
-      ]);
-
-      for (const connId of result.connections) {
-        if (!this.connectionMap.has(connId)) {
-          const conn = new Connection(this.workerApi, connId, Date.now());
-          this.connectionMap.set(connId, conn);
-        }
-        yield this.connectionMap.get(connId)!;
+    if (!this.initialized) throw new Error("Geofront is not initialized");
+    const result = this.getConnections();
+    for (const connId of result.connections) {
+      if (!this.connectionMap.has(connId)) {
+        const conn = new Connection(this, connId, Date.now());
+        this.connectionMap.set(connId, conn);
       }
-    } catch (err: any) {
-      const isWorkerError =
-        err?.message?.includes("Worker has been terminated") ||
-        err?.message?.includes("InvalidStateError") ||
-        err?.message?.includes("Worker is terminated");
-
-      if (isWorkerError) {
-        this.workerTerminated = true;
-        throw new Error("Worker has been terminated");
-      }
-      throw err;
+      yield this.connectionMap.get(connId)!;
     }
   }
 
   connection(id: number): Connection | undefined {
-    if (!this.initialized || this.workerTerminated) {
-      throw new Error(
-        "Geofront worker is not initialized or has been terminated"
-      );
-    }
+    if (!this.initialized) throw new Error("Geofront is not initialized");
     return this.connectionMap.get(id);
   }
 
   async shutdown() {
-    // 防止重复关闭
-    if (!this.initialized || this.shutdownInProgress || this.workerTerminated) {
+    if (!this.initialized || this.shutdownInProgress) {
       return;
     }
-
     this.shutdownInProgress = true;
 
+    this.disablePolling();
+
+    if (this.listenerId !== undefined) {
+      await this.stopListener(this.listenerId);
+    }
+
+    await symbols.proxy_shutdown();
+
+    this.initialized = false;
+    this.shutdownInProgress = false;
+  }
+
+  private enablePolling(intervalMs: number = 10) {
+    if (this.pollingEnabled) {
+      return;
+    }
+    this.pollingEnabled = true;
+    this.pollingInterval = setInterval(() => {
+      this.pollRequests();
+    }, intervalMs);
+  }
+
+  private disablePolling() {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
+    this.pollingEnabled = false;
+  }
+
+  private pollRequests() {
+    if (this.polling) {
+      return;
+    }
+    this.polling = true;
     try {
-      // 首先检查 Worker 是否仍然活跃
-      let workerAlive = true;
-      try {
-        // 尝试一个简单的调用来检查 Worker 状态
-        await Promise.race([
-          this.workerApi.getMetrics(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Worker 状态检查超时")), 1000)
-          ),
-        ]);
-      } catch (err: any) {
-        const isWorkerError =
-          err?.message?.includes("Worker has been terminated") ||
-          err?.message?.includes("InvalidStateError") ||
-          err?.message?.includes("Worker is terminated") ||
-          err?.message?.includes("Worker 状态检查超时");
-
-        if (isWorkerError) {
-          workerAlive = false;
-          this.workerTerminated = true;
-        }
-      }
-
-      // 如果 Worker 仍然活跃，尝试正常关闭
-      if (workerAlive && !this.workerTerminated) {
-        // 停止监听器
-        if (this.listenerId !== undefined) {
-          try {
-            await Promise.race([
-              this.workerApi.stopListener(this.listenerId),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("停止监听器超时")), 2000)
-              ),
-            ]);
-          } catch (err: any) {
-            const isWorkerError =
-              err?.message?.includes("Worker has been terminated") ||
-              err?.message?.includes("InvalidStateError") ||
-              err?.message?.includes("Worker is terminated");
-
-            if (isWorkerError) {
-              this.workerTerminated = true;
-            } else {
-              console.warn("停止监听器时出错:", err?.message);
-            }
-          }
-        }
-
-        // 移除路由回调
-
-        // 调用 Worker 的 shutdown
-        if (!this.workerTerminated) {
-          try {
-            await Promise.race([
-              this.workerApi.shutdown(),
-              new Promise((_, reject) =>
-                setTimeout(
-                  () => reject(new Error("Worker shutdown 超时")),
-                  3000
-                )
-              ),
-            ]);
-          } catch (err: any) {
-            const isWorkerError =
-              err?.message?.includes("Worker has been terminated") ||
-              err?.message?.includes("InvalidStateError") ||
-              err?.message?.includes("Worker is terminated");
-
-            if (isWorkerError) {
-              this.workerTerminated = true;
-            } else {
-              console.warn("Worker shutdown时出错:", err?.message);
-            }
-          }
-        }
-      }
-
-      // 释放 Comlink 代理，防止在 Worker 终止后尝试通信
-      try {
-        if (
-          this.workerApi &&
-          typeof this.workerApi[releaseProxy] === "function"
-        ) {
-          this.workerApi[releaseProxy]();
-        }
-      } catch (err: any) {
-        // 忽略释放代理时的错误，这是预期的清理过程
-        console.debug(
-          "释放 Comlink 代理时出错 (这通常是正常的):",
-          err?.message
-        );
-      }
-
-      // 给 Comlink 清理操作一些时间完成
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    } catch (err: any) {
-      console.warn("shutdown过程中出现意外错误:", err?.message);
+      this.pollRouteRequests();
+      this.pollMotdRequests();
+      this.pollDisconnectionEvents();
+    } catch (e) {
+      console.error("[ERROR] Error during polling:", e);
     } finally {
-      // 无论如何都要清理状态和终止 Worker
-      this.workerTerminated = true;
-      this.initialized = false;
-      this.shutdownInProgress = false;
+      this.polling = false;
+    }
+  }
 
-      try {
-        // 在终止 Worker 之前，再次尝试释放任何剩余的资源
-        if (this.worker && this.worker.terminate) {
-          this.worker.terminate();
+  private pollRouteRequests() {
+    let requestPtr;
+    try {
+      requestPtr = symbols.proxy_poll_route_request();
+      if (requestPtr === 0) return;
+
+      const requestJson = new CString(requestPtr).toString();
+      if (!requestJson) return;
+      const request = JSON.parse(requestJson);
+
+      activeConnections.add(BigInt(request.connId));
+
+      if (!this.routerCallback) {
+        const errResult = JSON.stringify({ disconnect: "No router configured" });
+        symbols.proxy_submit_routing_decision(
+          BigInt(request.connId),
+          Buffer.from(errResult + "\0")
+        );
+        return;
+      }
+
+      (async () => {
+        try {
+          const result = await this.handleRoute(
+            BigInt(request.connId),
+            request.peerIp,
+            request.protocol,
+            request.host,
+            request.username
+          );
+          const jsonResult = JSON.stringify(result);
+          symbols.proxy_submit_routing_decision(
+            BigInt(request.connId),
+            Buffer.from(jsonResult + "\0")
+          );
+        } catch (e) {
+          const errResult = JSON.stringify({ disconnect: "Internal router error" });
+          symbols.proxy_submit_routing_decision(
+            BigInt(request.connId),
+            Buffer.from(errResult + "\0")
+          );
         }
-      } catch (err: any) {
-        // 忽略终止 Worker 时的错误
-        console.debug("终止 Worker 时出错 (这通常是正常的):", err?.message);
+      })();
+    } catch (e) {
+      console.error("[ERROR] Error polling route requests:", e);
+    } finally {
+      if (requestPtr) {
+        symbols.proxy_free_string(requestPtr);
+      }
+    }
+  }
+
+  private pollMotdRequests() {
+    let requestPtr;
+    try {
+      requestPtr = symbols.proxy_poll_motd_request();
+      if (requestPtr === 0) return;
+
+      const requestJson = new CString(requestPtr).toString();
+      if (!requestJson) return;
+      const request = JSON.parse(requestJson);
+
+      if (!this.motdCallback) {
+        const errResult = JSON.stringify({
+          version: { name: "Geofront", protocol: request.protocol },
+          players: { max: 20, online: 0, sample: [] },
+          description: { text: "Geofront Proxy - No MOTD callback configured" },
+          favicon: null,
+        });
+        symbols.proxy_submit_motd_decision(
+          BigInt(request.connId),
+          Buffer.from(errResult + "\0")
+        );
+        return;
+      }
+
+      (async () => {
+        try {
+          const result = await this.handleMotd(
+            BigInt(request.connId),
+            request.peerIp,
+            request.protocol,
+            request.host,
+            ""
+          );
+          const jsonResult = JSON.stringify(result);
+          symbols.proxy_submit_motd_decision(
+            BigInt(request.connId),
+            Buffer.from(jsonResult + "\0")
+          );
+        } catch (e) {
+          const errResult = JSON.stringify({ disconnect: "Internal MOTD error" });
+          symbols.proxy_submit_motd_decision(
+            BigInt(request.connId),
+            Buffer.from(errResult + "\0")
+          );
+        }
+      })();
+    } catch (e) {
+      console.error("[ERROR] Error polling MOTD requests:", e);
+    } finally {
+      if (requestPtr) {
+        symbols.proxy_free_string(requestPtr);
+      }
+    }
+  }
+
+  private pollDisconnectionEvents() {
+    let eventPtr;
+    try {
+      eventPtr = symbols.proxy_poll_disconnection_event();
+      if (eventPtr === 0) return;
+
+      const eventJson = new CString(eventPtr).toString();
+      if (!eventJson) return;
+      const event = JSON.parse(eventJson);
+
+      this.handleDisconnection(BigInt(event.connId));
+    } catch (e) {
+      console.error("[ERROR] Error polling disconnection events:", e);
+    } finally {
+      if (eventPtr) {
+        symbols.proxy_free_string(eventPtr);
       }
     }
   }

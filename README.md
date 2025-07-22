@@ -34,38 +34,40 @@ bun install geofront-ts
 // server.ts
 import { Geofront } from 'geofront-ts'
 
-const proxy = new Geofront()
+;(async () => {
+	try {
+		const proxy = new Geofront()
 
-// 设置路由规则
-proxy.setRouter((ip, host, player, protocol) => {
-	console.log(
-		`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
-	)
+		// 初始化 Geofront 核心
+		await proxy.initialize()
 
-	if (host.toLowerCase() === 'mc.mydomain.com') {
-		// 允许连接，并路由到本地服务器
-		return {
-			remoteHost: '127.0.0.1',
-			remotePort: 25565
-		}
-	} else {
-		// 拒绝其他所有连接
-		return {
-			disconnect: '§cUnknown host! Please connect using mc.mydomain.com'
-		}
-	}
-})
+		// 设置路由规则
+		proxy.setRouter((ip, host, player, protocol) => {
+			console.log(
+				`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
+			)
 
-// 启动监听
-proxy.listen('0.0.0.0', 25565).then(result => {
-	if (result.code === 0) {
+			if (host.toLowerCase() === 'mc.mydomain.com') {
+				// 允许连接，并路由到本地服务器
+				return {
+					remoteHost: '127.0.0.1',
+					remotePort: 25565
+				}
+			} else {
+				// 拒绝其他所有连接
+				return {
+					disconnect: '§cUnknown host! Please connect using mc.mydomain.com'
+				}
+			}
+		})
+
+		// 启动监听
+		await proxy.listen('0.0.0.0', 25565)
 		console.log(`✅ Geofront proxy listening on 0.0.0.0:25565`)
-	} else {
-		console.error(`Failed to start listener, code: ${result.code}`)
+	} catch (e) {
+		console.error(`Failed to start geofront:`, e)
 	}
-})
-
-console.log('Proxy is starting...')
+})()
 ```
 
 然后运行它：
@@ -80,31 +82,33 @@ bun run server.ts
 // server.ts
 import { Geofront } from 'geofront-ts'
 
-const proxy = new Geofront()
+;(async () => {
+	try {
+		const proxy = new Geofront()
 
-// 设置路由规则
-proxy.setRouter((ip, host, player, protocol) => {
-	console.log(
-		`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
-	)
+		// 初始化 Geofront 核心
+		await proxy.initialize()
 
-	return {
-		remoteHost: 'mc.hypixel.net',
-		remotePort: 25565,
-		rewriteHost: 'mc.hypixel.net' // 该选项会重写重构握手包的 host 字段以绕过 Hypixel 的直连检测
-	}
-})
+		// 设置路由规则
+		proxy.setRouter((ip, host, player, protocol) => {
+			console.log(
+				`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
+			)
 
-// 启动监听
-proxy.listen('0.0.0.0', 25565).then(result => {
-	if (result.code === 0) {
+			return {
+				remoteHost: 'mc.hypixel.net',
+				remotePort: 25565,
+				rewriteHost: 'mc.hypixel.net' // 该选项会重写重构握手包的 host 字段以绕过 Hypixel 的直连检测
+			}
+		})
+
+		// 启动监听
+		await proxy.listen('0.0.0.0', 25565)
 		console.log(`✅ Geofront proxy listening on 0.0.0.0:25565`)
-	} else {
-		console.error(`Failed to start listener, code: ${result.code}`)
+	} catch (e) {
+		console.error(`Failed to start geofront:`, e)
 	}
-})
-
-console.log('Proxy is starting...')
+})()
 ```
 
 ## 🛠️ 构建
@@ -126,7 +130,105 @@ console.log('Proxy is starting...')
 
 ## 📚 API 文档
 
-_(即将推出)_
+### `Geofront`
+
+Geofront 的主类，用于管理代理实例。
+
+#### `new Geofront()`
+
+创建一个新的 Geofront 实例。
+
+#### `async geofront.initialize()`
+
+初始化 Geofront 核心。**必须在调用任何其他方法之前调用此方法。**
+
+#### `async geofront.listen(host: string, port: number)`
+
+在指定的 `host` 和 `port` 上启动一个新的监听器。
+
+-   返回: `Promise<{ code: number, listenerId: number }>`
+
+#### `geofront.setRouter(callback)`
+
+设置路由回调函数。对于每个新的连接，此回调函数都会被调用以决定如何处理它。
+
+-   `callback(ip: string, host: string, player: string, protocol: number): RouterResult`
+    -   `ip`: 客户端 IP 地址。
+    -   `host`: 玩家连接时使用的主机名。
+    -   `player`: 玩家的 Minecraft 用户名 (如果可用)。
+    -   `protocol`: 玩家使用的 Minecraft 协议版本号。
+    -   返回值 `RouterResult`:
+        -   `{ remoteHost: string, remotePort: number, ... }`: 允许连接并将其路由到指定的后端服务器。
+        -   `{ disconnect: string }`: 拒绝连接并向玩家显示指定的消息。
+
+#### `geofront.setMotdCallback(callback)`
+
+设置服务器列表 ping (MOTD) 的回调函数。
+
+-   `callback(ip: string, host: string, protocol: number): MotdResult`
+    -   返回一个 `MotdResult` 对象来动态生成服务器信息。
+
+#### `geofront.setDisconnectionCallback(callback)`
+
+设置一个在连接断开时触发的回调函数。
+
+-   `callback(connId: number)`
+
+#### `async geofront.shutdown()`
+
+平滑地关闭 Geofront 实例，断开所有监听器和连接。
+
+#### `async geofront.limit(opts: LimitOpts)`
+
+为所有**未来**的连接设置全局速率限制。
+
+-   `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
+
+#### `async geofront.kickAll()`
+
+断开所有当前活动的连接。
+
+#### `async geofront.getMetrics(): Promise<GlobalMetrics>`
+
+获取全局的流量和连接统计信息。
+
+#### `async *geofront.connections(): AsyncGenerator<Connection>`
+
+一个异步生成器，可以遍历所有当前活动的 `Connection` 对象。
+
+```typescript
+for await (const conn of geofront.connections()) {
+  console.log(`Active connection: ${conn.id}`);
+}
+```
+
+#### `geofront.connection(id: number): Connection | undefined`
+
+通过 ID 获取一个特定的 `Connection` 对象。
+
+---
+
+### `Connection`
+
+代表一个单独的客户端连接。
+
+#### `connection.id: number`
+
+连接的唯一数字 ID。
+
+#### `async connection.metrics: Promise<ConnectionMetrics>`
+
+获取此连接的字节发送/接收统计信息。
+
+#### `async connection.limit(opts: LimitOpts)`
+
+为此特定连接设置速率限制。
+
+-   `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
+
+#### `async connection.kick()`
+
+断开此连接。
 
 ## 🤝 贡献
 
