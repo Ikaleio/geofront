@@ -16,40 +16,46 @@ try {
 mkdirSync(distDir);
 console.log('Created dist directory.');
 
-// 2. Compile Rust code
-try {
-    console.log('Compiling Rust code...');
-    execSync('cargo build --release', { stdio: 'inherit' });
-    console.log('Rust code compiled successfully.');
-} catch (error) {
-    console.error('Failed to compile Rust code:', error);
-    process.exit(1);
-}
+// 2. Compile Rust code (if not skipped)
+const noRust = process.argv.includes('--no-rust');
 
-// 3. Copy native library
-const crateName = 'geofront';
-let libFileName;
-switch (platform()) {
-    case 'darwin':
-        libFileName = `lib${crateName}.dylib`;
-        break;
-    case 'win32':
-        libFileName = `${crateName}.dll`;
-        break;
-    default:
-        libFileName = `lib${crateName}.so`;
-        break;
-}
+if (!noRust) {
+    try {
+        console.log('Compiling Rust code...');
+        execSync('cargo build --release', { stdio: 'inherit' });
+        console.log('Rust code compiled successfully.');
+    } catch (error) {
+        console.error('Failed to compile Rust code:', error);
+        process.exit(1);
+    }
 
-const srcLibPath = join('target', 'release', libFileName);
-const destLibPath = join(distDir, libFileName);
+    // 3. Copy native library
+    const crateName = 'geofront';
+    let libFileName;
+    switch (platform()) {
+        case 'darwin':
+            libFileName = `lib${crateName}.dylib`;
+            break;
+        case 'win32':
+            libFileName = `${crateName}.dll`;
+            break;
+        default:
+            libFileName = `lib${crateName}.so`;
+            break;
+    }
 
-try {
-    copyFileSync(srcLibPath, destLibPath);
-    console.log(`Copied ${libFileName} to ${distDir}`);
-} catch (error) {
-    console.error(`Failed to copy native library:`, error);
-    process.exit(1);
+    const srcLibPath = join('target', 'release', libFileName);
+    const destLibPath = join(distDir, libFileName);
+
+    try {
+        copyFileSync(srcLibPath, destLibPath);
+        console.log(`Copied ${libFileName} to ${distDir}`);
+    } catch (error) {
+        console.error(`Failed to copy native library:`, error);
+        process.exit(1);
+    }
+} else {
+    console.log('Skipping Rust compilation and library copy.');
 }
 
 // 4. Bundle TypeScript source files with Bun
