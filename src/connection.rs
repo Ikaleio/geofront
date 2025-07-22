@@ -15,7 +15,11 @@ use crate::{
     },
 };
 use ppp::PartialResult;
-use std::{net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
+use std::{
+    net::SocketAddr,
+    num::NonZeroU32,
+    sync::{atomic::Ordering},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -333,7 +337,7 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     }
 
     // Data proxying
-    if let Err(e) = copy_bidirectional_with_metrics(conn_id, &mut inbound, &mut *outbound).await {
+    if let Err(e) = copy_bidirectional_with_metrics(conn_id, &mut inbound, &mut outbound).await {
         error!(conn = conn_id, "Connection proxy failed: {}", e);
     }
 
@@ -357,7 +361,53 @@ fn cleanup_conn(conn_id: ProxyConnection) {
 }
 
 /// A custom `copy_bidirectional` that updates metrics.
-async fn copy_bidirectional_with_metrics<'a, A, B>(
+#[cfg(not(target_os = "linux"))]
+async fn copy_bidirectional_with_metrics(
+    conn_id: ProxyConnection,
+    inbound: &mut TcpStream,
+    outbound: &mut (dyn AsyncRead + AsyncWrite + Unpin),
+) -> Result<(u64, u64), std::io::Error> {
+    copy_bidirectional_fallback(conn_id, inbound, outbound).await
+}
+
+#[cfg(target_os = "linux")]
+async fn copy_bidirectional_with_metrics(
+    conn_id: ProxyConnection,
+    inbound: &mut TcpStream,
+    outbound: &mut Box<AsyncStream>,
+) -> Result<(u64, u64), std::io::Error> {
+    use crate::splice;
+    use std::any::Any;
+    use tokio::net::TcpStream;
+
+    // Attempt to downcast to TcpStream for zero-copy.
+    let any_mut: &mut (dyn Any) = &mut **outbound;
+    if let Some(outbound_tcp) = any_mut.downcast_mut::<TcpStream>() {
+        // Both are TCP streams, we can use splice
+        let (a_to_b, b_to_a) = splice::zero_copy_bidirectional(inbound, outbound_tcp).await?;
+
+        // Update metrics
+        let conn_metrics = CONN_METRICS.lock().unwrap().get(&conn_id).cloned();
+        if let Some(metrics) = conn_metrics {
+            metrics
+                .bytes_sent
+                .fetch_add(a_to_b, Ordering::SeqCst);
+            metrics
+                .bytes_recv
+                .fetch_add(b_to_a, Ordering::SeqCst);
+            TOTAL_BYTES_SENT.fetch_add(a_to_b, Ordering::SeqCst);
+            TOTAL_BYTES_RECV.fetch_add(b_to_a, Ordering::SeqCst);
+        }
+
+        Ok((a_to_b, b_to_a))
+    } else {
+        // Fallback for non-TCP streams (like SOCKS5)
+        copy_bidirectional_fallback(conn_id, inbound, outbound).await
+    }
+}
+
+/// Fallback implementation using standard copy
+async fn copy_bidirectional_fallback<'a, A, B>(
     conn_id: ProxyConnection,
     a: &'a mut A,
     b: &'a mut B,

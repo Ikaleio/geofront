@@ -39,10 +39,11 @@ pub type ProxyListener = u64;
 pub type ProxyConnection = u64;
 
 // Define a new trait that combines the required traits for our dynamic stream.
-pub trait AsyncStreamTrait: AsyncRead + AsyncWrite + Unpin + Send {}
+use std::any::Any;
+pub trait AsyncStreamTrait: AsyncRead + AsyncWrite + Unpin + Send + Any {}
 
 // Implement this trait for any type that satisfies the bounds. This is a "blanket implementation".
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStreamTrait for T {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncStreamTrait for T {}
 
 // Use the new trait to define our dynamic stream type.
 pub type AsyncStream = dyn AsyncStreamTrait;
