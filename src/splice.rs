@@ -339,14 +339,85 @@ where
     let mut a_to_b = TransferState::Running(CopyBuffer::new(Pipe::new()?));
     let mut b_to_a = TransferState::Running(CopyBuffer::new(Pipe::new()?));
 
+    // Track if either direction has completed
+    let mut a_to_b_done = false;
+    let mut b_to_a_done = false;
+
     poll_fn(|cx| {
-        let a_to_b = transfer_one_direction(cx, &mut a_to_b, a, b)?;
-        let b_to_a = transfer_one_direction(cx, &mut b_to_a, b, a)?;
+        let mut a_to_b_count = 0;
+        let mut b_to_a_count = 0;
 
-        let a_to_b = ready!(a_to_b);
-        let b_to_a = ready!(b_to_a);
+        // Only poll a_to_b if it's not done and b_to_a hasn't completed
+        if !a_to_b_done && !b_to_a_done {
+            match transfer_one_direction(cx, &mut a_to_b, a, b) {
+                Poll::Ready(Ok(count)) => {
+                    a_to_b_done = true;
+                    a_to_b_count = count;
+                    // Shutdown the other direction's write end
+                    let _ = Pin::new(&mut *b).poll_shutdown(cx);
+                }
+                Poll::Ready(Err(e)) => {
+                    let _ = Pin::new(&mut *a).poll_shutdown(cx);
+                    let _ = Pin::new(&mut *b).poll_shutdown(cx);
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => {}
+            }
+        } else if a_to_b_done {
+            // Get the final count if already done
+            a_to_b_count = match &a_to_b {
+                TransferState::Done(count) => *count,
+                TransferState::ShuttingDown(count) => *count,
+                TransferState::Running(buf) => buf.amt,
+            };
+        }
 
-        Poll::Ready(Ok((a_to_b, b_to_a)))
+        // Only poll b_to_a if it's not done and a_to_b hasn't completed
+        if !b_to_a_done && !a_to_b_done {
+            match transfer_one_direction(cx, &mut b_to_a, b, a) {
+                Poll::Ready(Ok(count)) => {
+                    b_to_a_done = true;
+                    b_to_a_count = count;
+                    // Shutdown the other direction's write end
+                    let _ = Pin::new(&mut *a).poll_shutdown(cx);
+                }
+                Poll::Ready(Err(e)) => {
+                    let _ = Pin::new(&mut *a).poll_shutdown(cx);
+                    let _ = Pin::new(&mut *b).poll_shutdown(cx);
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => {}
+            }
+        } else if b_to_a_done {
+            // Get the final count if already done
+            b_to_a_count = match &b_to_a {
+                TransferState::Done(count) => *count,
+                TransferState::ShuttingDown(count) => *count,
+                TransferState::Running(buf) => buf.amt,
+            };
+        }
+
+        // If either direction completed, return immediately
+        if a_to_b_done || b_to_a_done {
+            // Make sure we have both counts
+            if !a_to_b_done {
+                a_to_b_count = match &a_to_b {
+                    TransferState::Done(count) => *count,
+                    TransferState::ShuttingDown(count) => *count,
+                    TransferState::Running(buf) => buf.amt,
+                };
+            }
+            if !b_to_a_done {
+                b_to_a_count = match &b_to_a {
+                    TransferState::Done(count) => *count,
+                    TransferState::ShuttingDown(count) => *count,
+                    TransferState::Running(buf) => buf.amt,
+                };
+            }
+            Poll::Ready(Ok((a_to_b_count, b_to_a_count)))
+        } else {
+            Poll::Pending
+        }
     })
     .await
 }
