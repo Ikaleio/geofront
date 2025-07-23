@@ -219,7 +219,6 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     // Rewrite host if specified
     let mut hs_for_rewrite = hs.clone(); // Clone for potential modification
     if let Some(new_host) = route_decision.rewrite_host {
-        info!(conn = conn_id, old_host = %hs.host, new_host = %new_host, "Rewriting host");
         hs_for_rewrite.host = new_host;
     }
 
@@ -730,7 +729,8 @@ async fn send_status_response(
         "description": motd_decision.description.clone()
             .unwrap_or_else(|| serde_json::json!({
                 "text": "Geofront Proxy"
-            }))
+            })),
+        "favicon": motd_decision.favicon.clone().map(|f| f.to_string()),
     });
 
     // Add favicon if present
