@@ -28,8 +28,8 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
         // Minimal login success packet to allow the client to proceed to the play state.
         // Packet ID 0x02 for Login Success
         const loginSuccessPacket = Buffer.from([
-            0x02,
-            0x00, // UUID and username, can be minimal for this test
+          0x02,
+          0x00, // UUID and username, can be minimal for this test
         ]);
         const packetLength = writeVarInt(loginSuccessPacket.length);
         socket.write(Buffer.concat([packetLength, loginSuccessPacket]));
@@ -51,84 +51,12 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
   });
 
   afterAll(async () => {
-    // 确保所有资源都被正确清理，即使发生错误也要继续清理其他资源
-    const errors: string[] = [];
-    let geofrontShutdownSuccessful = false;
-
-    // 清理 Geofront - 使用更健壮的错误处理
     if (geofront) {
-      try {
-        await Promise.race([
-          geofront.shutdown().then(() => {
-            geofrontShutdownSuccessful = true;
-          }),
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error("Geofront 关闭超时")), 8000)
-          ),
-        ]);
-      } catch (err: any) {
-        // 忽略常见的 Worker 终止错误
-        const isWorkerTerminatedError =
-          err?.message?.includes("Worker has been terminated") ||
-          err?.message?.includes("InvalidStateError") ||
-          err?.message?.includes("Worker is terminated");
-
-        if (!isWorkerTerminatedError && !err?.message?.includes("关闭超时")) {
-          errors.push(`关闭 Geofront 时发生错误: ${err?.message || err}`);
-        }
-      }
-
-      // 如果 Geofront 关闭失败，尝试强制清理
-      if (!geofrontShutdownSuccessful) {
-        try {
-          // 给更多时间让清理完成
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          geofront = null as any;
-        } catch (e) {
-          // 忽略强制清理的错误
-        }
-      }
+      await geofront.shutdown();
     }
-
-    // 在并行测试环境中，给额外的时间让 Comlink 清理完成
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    // 清理后端服务器
     if (backendServer) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error("后端服务器关闭超时"));
-          }, 3000);
-
-          backendServer.close((err) => {
-            clearTimeout(timeout);
-            if (err) reject(err);
-            else resolve();
-          });
-        });
-      } catch (err: any) {
-        errors.push(`关闭后端服务器时发生错误: ${err?.message || err}`);
-      }
-    }
-
-    // 等待后端服务器完全关闭
-    if (backendClosed) {
-      try {
-        await Promise.race([
-          backendClosed,
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error("等待后端服务器关闭超时")), 2000)
-          ),
-        ]);
-      } catch (err: any) {
-        errors.push(`等待后端服务器关闭时发生错误: ${err?.message || err}`);
-      }
-    }
-
-    // 如果有非关键错误，记录但不抛出
-    if (errors.length > 0) {
-      console.warn("清理过程中出现非关键错误:", errors.join("; "));
+      backendServer.close();
+      await backendClosed;
     }
   });
 
@@ -167,38 +95,44 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
       client.on("data", async (data: Buffer) => {
         receivedData = Buffer.concat([receivedData, data]);
         if (!gamePhase && receivedData.length > 0) {
-            loginSuccessReceived = true;
-            gamePhase = true;
+          loginSuccessReceived = true;
+          gamePhase = true;
 
-            // Find the connection object
-            for await (const conn of geofront.connections()) {
-                clientConnection = conn;
-                break;
-            }
+          // Find the connection object
+          for await (const conn of geofront.connections()) {
+            clientConnection = conn;
+            break;
+          }
 
-            if (!clientConnection) {
-                resolve({ success: false, error: "Could not find client connection object" });
-                return;
-            }
-
-            // Apply rate limit
-            await clientConnection.limit({
-                sendAvgBytes: RATE_LIMIT_BPS,
-                sendBurstBytes: RATE_LIMIT_BPS, // Burst same as average
+          if (!clientConnection) {
+            resolve({
+              success: false,
+              error: "Could not find client connection object",
             });
+            return;
+          }
 
-            // Start sending data at a fixed interval
-            const chunk = randomBytes(CHUNK_SIZE);
-            sendInterval = setInterval(() => {
-                const packetId = writeVarInt(0x10);
-                const packetData = Buffer.concat([packetId, chunk]);
-                const packet = Buffer.concat([writeVarInt(packetData.length), packetData]);
-                client.write(packet, (err) => {
-                    if (!err) {
-                        totalSent += packet.length;
-                    }
-                });
-            }, SEND_INTERVAL_MS);
+          // Apply rate limit
+          await clientConnection.limit({
+            sendAvgBytes: RATE_LIMIT_BPS,
+            sendBurstBytes: RATE_LIMIT_BPS, // Burst same as average
+          });
+
+          // Start sending data at a fixed interval
+          const chunk = randomBytes(CHUNK_SIZE);
+          sendInterval = setInterval(() => {
+            const packetId = writeVarInt(0x10);
+            const packetData = Buffer.concat([packetId, chunk]);
+            const packet = Buffer.concat([
+              writeVarInt(packetData.length),
+              packetData,
+            ]);
+            client.write(packet, (err) => {
+              if (!err) {
+                totalSent += packet.length;
+              }
+            });
+          }, SEND_INTERVAL_MS);
         }
       });
 
@@ -210,7 +144,10 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
       client.on("close", () => {
         if (sendInterval) clearInterval(sendInterval);
         if (!loginSuccessReceived) {
-            resolve({ success: false, error: "Connection closed before login success" });
+          resolve({
+            success: false,
+            error: "Connection closed before login success",
+          });
         }
       });
 
@@ -220,50 +157,68 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
 
         // If clientConnection is still not found, try to get it again.
         if (!clientConnection) {
-            for await (const conn of geofront.connections()) {
-                clientConnection = conn;
-                break;
-            }
+          for await (const conn of geofront.connections()) {
+            clientConnection = conn;
+            break;
+          }
         }
 
         if (!clientConnection) {
-          resolve({ success: false, error: "Test finished but client connection was not found" });
+          resolve({
+            success: false,
+            error: "Test finished but client connection was not found",
+          });
           client.end();
           return;
         }
-        
+
         // Log metrics periodically during the test
         const logInterval = setInterval(async () => {
-            if (clientConnection) {
-                await geofront.updateMetrics();
-                const metrics = geofront.metrics.connections[clientConnection.id];
-                console.log(`Intermediate metrics: sent=${metrics?.bytes_sent}, recv=${metrics?.bytes_recv}`);
-            }
+          if (clientConnection) {
+            await geofront.updateMetrics();
+            const metrics = geofront.metrics.connections[clientConnection.id];
+            console.log(
+              `Intermediate metrics: sent=${metrics?.bytes_sent}, recv=${metrics?.bytes_recv}`
+            );
+          }
         }, 1000);
 
         setTimeout(async () => {
-            clearInterval(logInterval);
-            
-            if (!clientConnection) {
-                resolve({ success: false, error: "Client connection not found at the end of the test." });
-                client.end();
-                return;
-            }
+          clearInterval(logInterval);
 
-            // Update and get metrics BEFORE closing the connection
-            await geofront.updateMetrics();
-            const globalMetrics = geofront.metrics;
-            const finalMetrics = globalMetrics.connections[clientConnection.id];
-
-            if (!finalMetrics) {
-              resolve({ success: false, error: `Metrics for connection ${clientConnection.id} not found in global metrics.` });
-              client.end();
-              return;
-            }
-            
+          if (!clientConnection) {
+            resolve({
+              success: false,
+              error: "Client connection not found at the end of the test.",
+            });
             client.end();
+            return;
+          }
 
-            resolve({ success: true, finalMetrics: { connection: finalMetrics, global: globalMetrics, totalSent } });
+          // Update and get metrics BEFORE closing the connection
+          await geofront.updateMetrics();
+          const globalMetrics = geofront.metrics;
+          const finalMetrics = globalMetrics.connections[clientConnection.id];
+
+          if (!finalMetrics) {
+            resolve({
+              success: false,
+              error: `Metrics for connection ${clientConnection.id} not found in global metrics.`,
+            });
+            client.end();
+            return;
+          }
+
+          client.end();
+
+          resolve({
+            success: true,
+            finalMetrics: {
+              connection: finalMetrics,
+              global: globalMetrics,
+              totalSent,
+            },
+          });
         }, TEST_DURATION_S * 1000);
       }, TEST_DURATION_S * 1000);
     });
@@ -273,8 +228,12 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
       console.error("Test failed with error:", result.error);
     }
     expect(result.success).toBe(true);
-    
-    const { connection: connMetrics, global: globalMetrics, totalSent: clientTotalSent } = result.finalMetrics;
+
+    const {
+      connection: connMetrics,
+      global: globalMetrics,
+      totalSent: clientTotalSent,
+    } = result.finalMetrics;
 
     // Verification
     const expectedMaxBytes = RATE_LIMIT_BPS * TEST_DURATION_S;
@@ -288,13 +247,17 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
     console.log(`Connection metrics (sent): ${connMetrics.bytes_sent} bytes`);
     console.log(`Expected max bytes (limit): ${expectedMaxBytes} bytes`);
 
-    expect(connMetrics.bytes_sent).toBeLessThanOrEqual(expectedMaxBytes * (1 + tolerance));
+    expect(connMetrics.bytes_sent).toBeLessThanOrEqual(
+      expectedMaxBytes * (1 + tolerance)
+    );
     // A sanity check that data was actually sent
     expect(connMetrics.bytes_sent).toBeGreaterThan(0);
 
     // 2. Check global metrics
     // Global metrics should include the traffic from this connection.
-    expect(globalMetrics.total_bytes_sent).toBeGreaterThanOrEqual(connMetrics.bytes_sent);
+    expect(globalMetrics.total_bytes_sent).toBeGreaterThanOrEqual(
+      connMetrics.bytes_sent
+    );
     expect(globalMetrics.active_conn).toBe(0); // Connection should be closed by now
   }, 15000); // Increase timeout for this test
 });

@@ -54,84 +54,12 @@ describe("Geofront E2E Test: Standard Proxy", () => {
   });
 
   afterAll(async () => {
-    // 确保所有资源都被正确清理，即使发生错误也要继续清理其他资源
-    const errors: string[] = [];
-    let geofrontShutdownSuccessful = false;
-
-    // 清理 Geofront - 使用更健壮的错误处理
     if (geofront) {
-      try {
-        await Promise.race([
-          geofront.shutdown().then(() => {
-            geofrontShutdownSuccessful = true;
-          }),
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error("Geofront 关闭超时")), 8000)
-          ),
-        ]);
-      } catch (err: any) {
-        // 忽略常见的 Worker 终止错误
-        const isWorkerTerminatedError =
-          err?.message?.includes("Worker has been terminated") ||
-          err?.message?.includes("InvalidStateError") ||
-          err?.message?.includes("Worker is terminated");
-
-        if (!isWorkerTerminatedError && !err?.message?.includes("关闭超时")) {
-          errors.push(`关闭 Geofront 时发生错误: ${err?.message || err}`);
-        }
-      }
-
-      // 如果 Geofront 关闭失败，尝试强制清理
-      if (!geofrontShutdownSuccessful) {
-        try {
-          // 给更多时间让清理完成
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          geofront = null as any;
-        } catch (e) {
-          // 忽略强制清理的错误
-        }
-      }
+      await geofront.shutdown();
     }
-
-    // 在并行测试环境中，给额外的时间让 Comlink 清理完成
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    // 清理后端服务器
     if (backendServer) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error("后端服务器关闭超时"));
-          }, 3000);
-
-          backendServer.close((err) => {
-            clearTimeout(timeout);
-            if (err) reject(err);
-            else resolve();
-          });
-        });
-      } catch (err: any) {
-        errors.push(`关闭后端服务器时发生错误: ${err?.message || err}`);
-      }
-    }
-
-    // 等待后端服务器完全关闭
-    if (backendClosed) {
-      try {
-        await Promise.race([
-          backendClosed,
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error("等待后端服务器关闭超时")), 2000)
-          ),
-        ]);
-      } catch (err: any) {
-        errors.push(`等待后端服务器关闭时发生错误: ${err?.message || err}`);
-      }
-    }
-
-    // 如果有非关键错误，记录但不抛出
-    if (errors.length > 0) {
-      console.warn("清理过程中出现非关键错误:", errors.join("; "));
+      backendServer.close();
+      await backendClosed;
     }
   });
 
@@ -143,7 +71,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     const testResult = new Promise<{ success: boolean; error?: string }>(
       (resolve) => {
         let client: any = null;
-        let timeoutId: NodeJS.Timeout | null = null;
         let resolved = false;
         let gamePhase = false;
         let loginSuccessReceived = false;
@@ -152,12 +79,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
         const safeResolve = (result: { success: boolean; error?: string }) => {
           if (resolved) return;
           resolved = true;
-
-          // 清理超时
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-          }
 
           // 强制关闭客户端连接
           if (client) {
@@ -299,14 +220,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
               }
             }
           });
-
-          // 设置超时，防止测试挂起
-          timeoutId = setTimeout(() => {
-            safeResolve({
-              success: false,
-              error: `测试超时: 游戏阶段=${gamePhase}, 期望 ${DATA_SIZE} 字节，实际接收 ${receivedData.length} 字节`,
-            });
-          }, 30000); // 30秒超时
         } catch (err: any) {
           safeResolve({
             success: false,
@@ -357,7 +270,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     const testResult = new Promise<{ success: boolean; error?: string }>(
       (resolve) => {
         let client: any = null;
-        let timeoutId: NodeJS.Timeout | null = null;
         let resolved = false;
         let connectedSuccessfully = false;
 
@@ -365,12 +277,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
         const safeResolve = (result: { success: boolean; error?: string }) => {
           if (resolved) return;
           resolved = true;
-
-          // 清理超时
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-          }
 
           // 强制关闭客户端连接
           if (client) {
@@ -444,14 +350,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
               }
             }, 200); // 等待200ms确保回调被调用
           });
-
-          // 设置超时，防止测试挂起
-          timeoutId = setTimeout(() => {
-            safeResolve({
-              success: false,
-              error: `断开连接回调测试超时，已记录的断开连接: ${disconnectedConnections.length}`,
-            });
-          }, 5000); // 5秒超时
         } catch (err: any) {
           safeResolve({
             success: false,
@@ -489,17 +387,11 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     for (let i = 0; i < numClients; i++) {
       const clientPromise = new Promise<boolean>((resolve) => {
         let client: any = null;
-        let timeoutId: NodeJS.Timeout | null = null;
         let resolved = false;
 
         const safeResolve = (success: boolean) => {
           if (resolved) return;
           resolved = true;
-
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-          }
 
           if (client) {
             try {
@@ -552,11 +444,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
               safeResolve(true);
             }, 100);
           });
-
-          // 设置超时
-          timeoutId = setTimeout(() => {
-            safeResolve(false);
-          }, 3000);
         } catch (err: any) {
           safeResolve(false);
         }

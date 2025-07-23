@@ -685,8 +685,6 @@ export class Geofront {
       if (!eventJson) return;
       const event = JSON.parse(eventJson);
 
-      console.log(this.onlinePlayerConnSet.has(event.connId));
-
       if (this.onlinePlayerConnSet.has(event.connId)) {
         this.onlinePlayerConnSet.delete(event.connId);
       }
