@@ -8,7 +8,13 @@ import {
   type MotdType,
   buildMotd,
 } from "./motd";
-import { CString, dlopen, FFIType } from "bun:ffi";
+import {
+  CString,
+  dlopen,
+  FFIType,
+  type ConvertFns,
+  type Pointer,
+} from "bun:ffi";
 import { platform } from "os";
 import { join } from "path";
 
@@ -62,8 +68,65 @@ export interface GlobalMetrics {
   connections: Record<string, ConnectionMetrics>;
 }
 
+export const FFISymbols = {
+  proxy_set_options: {
+    args: [FFIType.cstring],
+    returns: FFIType.i32,
+  },
+  proxy_submit_routing_decision: {
+    args: [FFIType.u64, FFIType.cstring],
+    returns: FFIType.i32,
+  },
+  proxy_submit_motd_decision: {
+    args: [FFIType.u64, FFIType.cstring],
+    returns: FFIType.i32,
+  },
+  proxy_start_listener: {
+    args: [FFIType.cstring, FFIType.u16, FFIType.ptr],
+    returns: FFIType.i32,
+  },
+  proxy_stop_listener: { args: [FFIType.u64], returns: FFIType.i32 },
+  proxy_disconnect: { args: [FFIType.u64], returns: FFIType.i32 },
+  proxy_set_rate_limit: {
+    args: [
+      FFIType.u64, // connId
+      FFIType.u64, // send_avg_bytes_per_sec
+      FFIType.u64, // send_burst_bytes_per_sec
+      FFIType.u64, // recv_avg_bytes_per_sec
+      FFIType.u64, // recv_burst_bytes_per_sec
+    ],
+    returns: FFIType.i32,
+  },
+  proxy_shutdown: { args: [], returns: FFIType.i32 },
+  proxy_kick_all: { args: [], returns: FFIType.u32 },
+  proxy_get_metrics: {
+    args: [],
+    returns: FFIType.pointer,
+  },
+  proxy_get_connection_metrics: {
+    args: [FFIType.u64],
+    returns: FFIType.pointer,
+  },
+  proxy_free_string: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
+  proxy_poll_route_request: {
+    args: [],
+    returns: FFIType.pointer,
+  },
+  proxy_poll_motd_request: {
+    args: [],
+    returns: FFIType.pointer,
+  },
+  proxy_poll_disconnection_event: {
+    args: [],
+    returns: FFIType.pointer,
+  },
+};
+
 // FFI 符号 - 在 initialize 中加载
-let symbols: any = null;
+let symbols: ConvertFns<typeof FFISymbols>;
 
 // 存储活动连接 ID
 const activeConnections = new Set<bigint>();
@@ -83,11 +146,11 @@ export class Connection {
     return this._id;
   }
 
-  get metrics(): Promise<ConnectionMetrics> {
+  get metrics(): ConnectionMetrics {
     return this.geofront.getConnectionMetrics(this._id);
   }
 
-  async limit(opts: LimitOpts) {
+  limit(opts: LimitOpts) {
     const parsed = limitSchema.parse(opts);
     return this.geofront.setRateLimit(
       this._id,
@@ -98,7 +161,7 @@ export class Connection {
     );
   }
 
-  async kick() {
+  kick() {
     return this.geofront.disconnect(this._id);
   }
 }
@@ -120,7 +183,6 @@ export class Geofront {
   private connectionMap = new Map<number, Connection>();
   private onlinePlayerConnSet = new Set<number>();
   private globalLimit: LimitOpts = {};
-  private initialized = false;
   private shutdownInProgress = false;
   public metrics: GlobalMetrics;
 
@@ -128,7 +190,7 @@ export class Geofront {
   private pollingEnabled = false;
   private polling = false;
 
-  constructor() {
+  private constructor() {
     this.metrics = {
       total_conn: 0,
       active_conn: 0,
@@ -138,10 +200,9 @@ export class Geofront {
     };
   }
 
-  async initialize() {
-    if (this.initialized) {
-      return;
-    }
+  static create(): Geofront {
+    const instance = new Geofront();
+
     try {
       // --- 动态加载 FFI 库 ---
       let libPath: string;
@@ -169,81 +230,26 @@ export class Geofront {
         );
       }
 
-      const { symbols: ffiSymbols } = dlopen(libPath, {
-        proxy_set_options: {
-          args: [FFIType.cstring],
-          returns: FFIType.i32,
-        },
-        proxy_submit_routing_decision: {
-          args: [FFIType.u64, FFIType.cstring],
-          returns: FFIType.i32,
-        },
-        proxy_submit_motd_decision: {
-          args: [FFIType.u64, FFIType.cstring],
-          returns: FFIType.i32,
-        },
-        proxy_start_listener: {
-          args: [FFIType.cstring, FFIType.u16, FFIType.ptr],
-          returns: FFIType.i32,
-        },
-        proxy_stop_listener: { args: [FFIType.u64], returns: FFIType.i32 },
-        proxy_disconnect: { args: [FFIType.u64], returns: FFIType.i32 },
-        proxy_set_rate_limit: {
-          args: [
-            FFIType.u64, // connId
-            FFIType.u64, // send_avg_bytes_per_sec
-            FFIType.u64, // send_burst_bytes_per_sec
-            FFIType.u64, // recv_avg_bytes_per_sec
-            FFIType.u64, // recv_burst_bytes_per_sec
-          ],
-          returns: FFIType.i32,
-        },
-        proxy_shutdown: { args: [], returns: FFIType.i32 },
-        proxy_kick_all: { args: [], returns: FFIType.u32 },
-        proxy_get_metrics: {
-          args: [],
-          returns: FFIType.pointer,
-        },
-        proxy_get_connection_metrics: {
-          args: [FFIType.u64],
-          returns: FFIType.pointer,
-        },
-        proxy_free_string: {
-          args: [FFIType.ptr],
-          returns: FFIType.void,
-        },
-        proxy_poll_route_request: {
-          args: [],
-          returns: FFIType.pointer,
-        },
-        proxy_poll_motd_request: {
-          args: [],
-          returns: FFIType.pointer,
-        },
-        proxy_poll_disconnection_event: {
-          args: [],
-          returns: FFIType.pointer,
-        },
-      });
-      symbols = ffiSymbols;
+      const lib = dlopen(libPath, FFISymbols);
+      symbols = lib.symbols;
 
       // 启动轮询
-      this.enablePolling(10);
+      instance.enablePolling(10);
 
-      this.initialized = true;
+      return instance;
     } catch (e) {
       console.error("Failed to initialize Geofront:", e);
       throw e;
     }
   }
 
-  private async handleRoute(
+  private handleRoute(
     connId: bigint,
     peerIp: string,
     protocol: number,
     host: string,
     user: string
-  ): Promise<RouterResult> {
+  ): RouterResult {
     let result: RouterResult;
     if (!this.routerCallback) {
       result = { disconnect: "No router configured" };
@@ -261,13 +267,13 @@ export class Geofront {
     return result;
   }
 
-  private async handleMotd(
+  private handleMotd(
     connId: bigint,
     peerIp: string,
     protocol: number,
     host: string,
     user: string
-  ): Promise<MotdType | { disconnect: string }> {
+  ): MotdType | { disconnect: string } {
     if (!this.motdCallback) {
       // 创建默认 MOTD
       const defaultInput: MotdInput = {
@@ -337,10 +343,7 @@ export class Geofront {
     }
   }
 
-  async listen(host: string, port: number) {
-    if (!this.initialized) {
-      throw new Error("Geofront is not initialized");
-    }
+  listen(host: string, port: number) {
     const buf = new ArrayBuffer(8);
     const code = symbols.proxy_start_listener(
       Buffer.from(host + "\0"),
@@ -349,16 +352,13 @@ export class Geofront {
     );
     const listenerId = new DataView(buf).getBigUint64(0, true);
     this.listenerId = Number(listenerId);
-    await this.updateMetrics();
+    this.updateMetrics();
     return { code, listenerId: this.listenerId };
   }
 
-  async updateMetrics() {
-    if (!this.initialized) {
-      throw new Error("Geofront is not initialized");
-    }
+  updateMetrics() {
     try {
-      this.metrics = await this.getMetrics();
+      this.metrics = this.getMetrics();
     } catch (error) {
       throw new Error(`Failed to update metrics: ${error}`);
     }
@@ -372,47 +372,35 @@ export class Geofront {
       protocol: number
     ) => RouterResult
   ) {
-    if (!this.initialized) {
-      throw new Error("Geofront is not initialized");
-    }
     this.routerCallback = callback;
   }
 
   setMotdCallback(
     callback: (ip: string, host: string, protocol: number) => MotdResult
   ) {
-    if (!this.initialized) {
-      throw new Error("Geofront is not initialized");
-    }
     this.motdCallback = callback;
   }
 
   setDisconnectionCallback(callback: (connId: number) => void) {
-    if (!this.initialized) {
-      throw new Error("Geofront is not initialized");
-    }
     this.disconnectionCallback = callback;
   }
 
-  async stopListener(listenerId: number) {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  stopListener(listenerId: number) {
     return symbols.proxy_stop_listener(BigInt(listenerId));
   }
 
-  async disconnect(connectionId: number) {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  disconnect(connectionId: number) {
     activeConnections.delete(BigInt(connectionId));
     return symbols.proxy_disconnect(BigInt(connectionId));
   }
 
-  async setRateLimit(
+  setRateLimit(
     connectionId: number,
     sendAvgBytes: number,
     sendBurstBytes: number,
     recvAvgBytes: number,
     recvBurstBytes: number
   ) {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
     return symbols.proxy_set_rate_limit(
       BigInt(connectionId),
       BigInt(sendAvgBytes),
@@ -422,11 +410,10 @@ export class Geofront {
     );
   }
 
-  async getMetrics(): Promise<GlobalMetrics> {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
-    let metricsPtr;
+  getMetrics(): GlobalMetrics {
+    let metricsPtr: Pointer | null = null;
     try {
-      metricsPtr = symbols.proxy_get_metrics();
+      metricsPtr = symbols.proxy_get_metrics() as Pointer;
       if (metricsPtr === 0) {
         return {
           total_conn: 0,
@@ -446,17 +433,17 @@ export class Geofront {
   }
 
   getConnections() {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
     return {
       connections: Array.from(activeConnections).map((id) => Number(id)),
     };
   }
 
-  async getConnectionMetrics(connectionId: number): Promise<ConnectionMetrics> {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  getConnectionMetrics(connectionId: number): ConnectionMetrics {
     let metricsPtr;
     try {
-      metricsPtr = symbols.proxy_get_connection_metrics(BigInt(connectionId));
+      metricsPtr = symbols.proxy_get_connection_metrics(
+        BigInt(connectionId)
+      ) as Pointer;
       if (metricsPtr === 0) {
         return { bytes_sent: 0, bytes_recv: 0 };
       }
@@ -469,15 +456,13 @@ export class Geofront {
     }
   }
 
-  async kickAll() {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  kickAll() {
     const kickedCount = symbols.proxy_kick_all();
     activeConnections.clear();
     return kickedCount;
   }
 
   async limit(opts: LimitOpts) {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
     const parsed = limitSchema.parse(opts);
     this.globalLimit = parsed;
 
@@ -497,15 +482,13 @@ export class Geofront {
     await Promise.all(promises);
   }
 
-  async setOptions(options: GeofrontOptions): Promise<number> {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  setOptions(options: GeofrontOptions): number {
     const validatedOptions = geofrontOptionsSchema.parse(options);
     const jsonOptions = JSON.stringify(validatedOptions);
-    return symbols.proxy_set_options(Buffer.from(jsonOptions + "\0"));
+    return symbols.proxy_set_options(Buffer.from(jsonOptions + "\0")) as number;
   }
 
-  async *connections(): AsyncGenerator<Connection> {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
+  *connections(): Generator<Connection> {
     const result = this.getConnections();
     for (const connId of result.connections) {
       if (!this.connectionMap.has(connId)) {
@@ -517,12 +500,11 @@ export class Geofront {
   }
 
   connection(id: number): Connection | undefined {
-    if (!this.initialized) throw new Error("Geofront is not initialized");
     return this.connectionMap.get(id);
   }
 
   async shutdown() {
-    if (!this.initialized || this.shutdownInProgress) {
+    if (this.shutdownInProgress) {
       return;
     }
     this.shutdownInProgress = true;
@@ -530,12 +512,11 @@ export class Geofront {
     this.disablePolling();
 
     if (this.listenerId !== undefined) {
-      await this.stopListener(this.listenerId);
+      this.stopListener(this.listenerId);
     }
 
     await symbols.proxy_shutdown();
 
-    this.initialized = false;
     this.shutdownInProgress = false;
   }
 
@@ -576,7 +557,7 @@ export class Geofront {
   private pollRouteRequests() {
     let requestPtr;
     try {
-      requestPtr = symbols.proxy_poll_route_request();
+      requestPtr = symbols.proxy_poll_route_request() as Pointer;
       if (requestPtr === 0) return;
 
       const requestJson = new CString(requestPtr).toString();
@@ -598,7 +579,7 @@ export class Geofront {
 
       (async () => {
         try {
-          const result = await this.handleRoute(
+          const result = this.handleRoute(
             BigInt(request.connId),
             request.peerIp,
             request.protocol,
@@ -635,7 +616,7 @@ export class Geofront {
   private pollMotdRequests() {
     let requestPtr;
     try {
-      requestPtr = symbols.proxy_poll_motd_request();
+      requestPtr = symbols.proxy_poll_motd_request() as Pointer;
       if (requestPtr === 0) return;
 
       const requestJson = new CString(requestPtr).toString();
@@ -644,7 +625,7 @@ export class Geofront {
 
       (async () => {
         try {
-          const result = await this.handleMotd(
+          const result = this.handleMotd(
             BigInt(request.connId),
             request.peerIp,
             request.protocol,
@@ -678,7 +659,7 @@ export class Geofront {
   private pollDisconnectionEvents() {
     let eventPtr;
     try {
-      eventPtr = symbols.proxy_poll_disconnection_event();
+      eventPtr = symbols.proxy_poll_disconnection_event() as Pointer;
       if (eventPtr === 0) return;
 
       const eventJson = new CString(eventPtr).toString();

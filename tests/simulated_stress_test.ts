@@ -24,13 +24,13 @@ describe("Geofront Stress Test", () => {
     backendServer = backend.server;
     backendClosed = backend.closed;
 
-    geofront = new Geofront();
-    await geofront.initialize();
+    geofront = Geofront.create();
     geofront.setRouter(() => ({
       remoteHost: TEST_CONSTANTS.BACKEND_HOST,
       remotePort: BACKEND_PORT,
     }));
-    await geofront.listen("0.0.0.0", PROXY_PORT);
+    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
+    expect(code).toBe(0);
   });
 
   afterAll(async () => {

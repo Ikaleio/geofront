@@ -32,41 +32,44 @@ bun install geofront-ts
 
 ```typescript
 // server.ts
-import { Geofront } from 'geofront-ts'
-;(async () => {
-	try {
-		const proxy = new Geofront()
+import { Geofront } from "geofront-ts";
 
-		// 初始化 Geofront 核心
-		await proxy.initialize()
+try {
+  // 使用工厂方法创建 Geofront 实例
+  const proxy = Geofront.create();
 
-		// 设置路由规则
-		proxy.setRouter((ip, host, player, protocol) => {
-			console.log(
-				`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
-			)
+  // 设置路由规则
+  proxy.setRouter((ip, host, player, protocol) => {
+    console.log(
+      `New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
+    );
 
-			if (host.toLowerCase() === 'mc.mydomain.com') {
-				// 允许连接，并路由到本地服务器
-				return {
-					remoteHost: '127.0.0.1',
-					remotePort: 25565
-				}
-			} else {
-				// 拒绝其他所有连接
-				return {
-					disconnect: '§cUnknown host! Please connect using mc.mydomain.com'
-				}
-			}
-		})
+    if (host.toLowerCase() === "mc.mydomain.com") {
+      // 允许连接，并路由到本地服务器
+      return {
+        remoteHost: "127.0.0.1",
+        remotePort: 25565,
+      };
+    } else {
+      // 拒绝其他所有连接
+      return {
+        disconnect: "§cUnknown host! Please connect using mc.mydomain.com",
+      };
+    }
+  });
 
-		// 启动监听
-		await proxy.listen('0.0.0.0', 25565)
-		console.log(`✅ Geofront proxy listening on 0.0.0.0:25565`)
-	} catch (e) {
-		console.error(`Failed to start geofront:`, e)
-	}
-})()
+  // 启动监听
+  const { code, listenerId } = proxy.listen("0.0.0.0", 25565);
+  if (code === 0) {
+    console.log(
+      `✅ Geofront proxy listening on 0.0.0.0:25565 (ID: ${listenerId})`
+    );
+  } else {
+    throw new Error(`Failed to start listener: code ${code}`);
+  }
+} catch (e) {
+  console.error(`Failed to start geofront:`, e);
+}
 ```
 
 然后运行它：
@@ -79,34 +82,37 @@ bun run server.ts
 
 ```typescript
 // server.ts
-import { Geofront } from 'geofront-ts'
-;(async () => {
-	try {
-		const proxy = new Geofront()
+import { Geofront } from "geofront-ts";
 
-		// 初始化 Geofront 核心
-		await proxy.initialize()
+try {
+  // 使用工厂方法创建 Geofront 实例
+  const proxy = Geofront.create();
 
-		// 设置路由规则
-		proxy.setRouter((ip, host, player, protocol) => {
-			console.log(
-				`New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
-			)
+  // 设置路由规则
+  proxy.setRouter((ip, host, player, protocol) => {
+    console.log(
+      `New connection from ${player}@${ip} to ${host} (protocol: ${protocol})`
+    );
 
-			return {
-				remoteHost: 'mc.hypixel.net',
-				remotePort: 25565,
-				rewriteHost: 'mc.hypixel.net' // 该选项会重写重构握手包的 host 字段以绕过 Hypixel 的直连检测
-			}
-		})
+    return {
+      remoteHost: "mc.hypixel.net",
+      remotePort: 25565,
+      rewriteHost: "mc.hypixel.net", // 该选项会重写重构握手包的 host 字段以绕过 Hypixel 的直连检测
+    };
+  });
 
-		// 启动监听
-		await proxy.listen('0.0.0.0', 25565)
-		console.log(`✅ Geofront proxy listening on 0.0.0.0:25565`)
-	} catch (e) {
-		console.error(`Failed to start geofront:`, e)
-	}
-})()
+  // 启动监听
+  const { code, listenerId } = proxy.listen("0.0.0.0", 25565);
+  if (code === 0) {
+    console.log(
+      `✅ Geofront proxy listening on 0.0.0.0:25565 (ID: ${listenerId})`
+    );
+  } else {
+    throw new Error(`Failed to start listener: code ${code}`);
+  }
+} catch (e) {
+  console.error(`Failed to start geofront:`, e);
+}
 ```
 
 ## 🛠️ 构建
@@ -132,19 +138,21 @@ import { Geofront } from 'geofront-ts'
 
 Geofront 的主类，用于管理代理实例。
 
-#### `new Geofront()`
+#### `Geofront.create(): Geofront`
 
-创建一个新的 Geofront 实例。
+使用工厂方法创建一个新的 Geofront 实例。这个方法会自动初始化 FFI 库和轮询系统。
 
-#### `async geofront.initialize()`
+```typescript
+const geofront = Geofront.create();
+```
 
-初始化 Geofront 核心。**必须在调用任何其他方法之前调用此方法。**
-
-#### `async geofront.listen(host: string, port: number)`
+#### `geofront.listen(host: string, port: number): { code: number, listenerId: number }`
 
 在指定的 `host` 和 `port` 上启动一个新的监听器。
 
-- 返回: `Promise<{ code: number, listenerId: number }>`
+- 返回: `{ code: number, listenerId: number }`
+  - `code`: 0 表示成功，非 0 表示错误
+  - `listenerId`: 监听器的唯一 ID
 
 #### `geofront.setRouter(callback)`
 
@@ -176,27 +184,29 @@ Geofront 的主类，用于管理代理实例。
 
 平滑地关闭 Geofront 实例，断开所有监听器和连接。
 
-#### `async geofront.limit(opts: LimitOpts)`
+#### `geofront.limit(opts: LimitOpts)`
 
-为所有**未来**的连接设置全局速率限制。
+为所有**当前和未来**的连接设置全局速率限制。
 
 - `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
 
-#### `async geofront.kickAll()`
+#### `geofront.kickAll(): number`
 
 断开所有当前活动的连接。
 
-#### `async geofront.getMetrics(): Promise<GlobalMetrics>`
+- 返回: 被断开的连接数量
+
+#### `geofront.getMetrics(): GlobalMetrics`
 
 获取全局的流量和连接统计信息。
 
-#### `async *geofront.connections(): AsyncGenerator<Connection>`
+#### `*geofront.connections(): Generator<Connection>`
 
-一个异步生成器，可以遍历所有当前活动的 `Connection` 对象。
+一个生成器，可以遍历所有当前活动的 `Connection` 对象。
 
 ```typescript
-for await (const conn of geofront.connections()) {
-	console.log(`Active connection: ${conn.id}`)
+for (const conn of geofront.connections()) {
+  console.log(`Active connection: ${conn.id}`);
 }
 ```
 
@@ -214,17 +224,17 @@ for await (const conn of geofront.connections()) {
 
 连接的唯一数字 ID。
 
-#### `async connection.metrics: Promise<ConnectionMetrics>`
+#### `connection.metrics: ConnectionMetrics`
 
 获取此连接的字节发送/接收统计信息。
 
-#### `async connection.limit(opts: LimitOpts)`
+#### `connection.limit(opts: LimitOpts)`
 
 为此特定连接设置速率限制。
 
 - `opts`: `{ sendAvgBytes?: number, sendBurstBytes?: number, recvAvgBytes?: number, recvBurstBytes?: number }`
 
-#### `async connection.kick()`
+#### `connection.kick()`
 
 断开此连接。
 
