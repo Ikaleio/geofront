@@ -41,8 +41,7 @@ describe("Geofront E2E Test: SOCKS5 Proxy", () => {
     backendClosed = backend.closed;
 
     // 启动 Geofront
-    geofront = new Geofront();
-    await geofront.initialize();
+    geofront = Geofront.create();
     geofront.setRouter((ip, host, player, protocol) => {
       return {
         remoteHost: TEST_CONSTANTS.BACKEND_HOST,
@@ -50,7 +49,8 @@ describe("Geofront E2E Test: SOCKS5 Proxy", () => {
         proxy: `socks5://127.0.0.1:${SOCKS_PORT}`,
       };
     });
-    await geofront.listen("0.0.0.0", PROXY_PORT);
+    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
+    expect(code).toBe(0);
   });
 
   afterAll(async () => {

@@ -38,8 +38,7 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
     backendServer = backend.server;
     backendClosed = backend.closed;
 
-    geofront = new Geofront();
-    await geofront.initialize();
+    geofront = Geofront.create();
 
     geofront.setRouter((ip, host, player, protocol) => {
       return {
@@ -47,7 +46,8 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
         remotePort: BACKEND_PORT,
       };
     });
-    await geofront.listen("0.0.0.0", PROXY_PORT);
+    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
+    expect(code).toBe(0);
   });
 
   afterAll(async () => {
@@ -113,7 +113,7 @@ describe("Geofront E2E Test: Rate Limiting and Metrics", () => {
           }
 
           // Apply rate limit
-          await clientConnection.limit({
+          clientConnection.limit({
             sendAvgBytes: RATE_LIMIT_BPS,
             sendBurstBytes: RATE_LIMIT_BPS, // Burst same as average
           });

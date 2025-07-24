@@ -135,11 +135,10 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
   async function createGeofrontInstance(
     proxyProtocolIn: "none" | "optional" | "strict"
   ) {
-    const geofront = new Geofront();
-    await geofront.initialize();
+    const geofront = Geofront.create();
 
     // 设置 PROXY Protocol 选项
-    const result = await geofront.setOptions({ proxyProtocolIn });
+    const result = geofront.setOptions({ proxyProtocolIn });
     expect(result).toBe(0); // 确保设置成功
 
     geofront.setRouter((ip, host, player, protocol) => {
@@ -150,7 +149,8 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
     });
 
     const proxyPort = getRandomPort();
-    await geofront.listen("0.0.0.0", proxyPort);
+    const { code } = geofront.listen("0.0.0.0", proxyPort);
+    expect(code).toBe(0);
 
     return { geofront, proxyPort };
   }
@@ -224,24 +224,23 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
   });
 
   test("should validate setOptions with different values", async () => {
-    const geofront = new Geofront();
-    await geofront.initialize();
+    const geofront = Geofront.create();
 
     try {
       // 测试所有有效的选项值
       const validOptions = ["none", "optional", "strict"] as const;
       for (const option of validOptions) {
-        const result = await geofront.setOptions({ proxyProtocolIn: option });
+        const result = geofront.setOptions({ proxyProtocolIn: option });
         expect(result).toBe(0); // PROXY_OK
       }
 
       // 测试无效选项应该抛出错误
-      await expect(() =>
+      expect(() =>
         geofront.setOptions({ proxyProtocolIn: "invalid" as any })
       ).toThrow();
 
       // 测试空选项对象
-      const result = await geofront.setOptions({});
+      const result = geofront.setOptions({});
       expect(result).toBe(0);
     } finally {
       await geofront.shutdown();

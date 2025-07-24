@@ -34,12 +34,11 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     backendServer = backend.server;
     backendClosed = backend.closed;
 
-    // 启动 Geofront
-    geofront = new Geofront();
-    await geofront.initialize();
+    // 使用工厂方法创建 Geofront
+    geofront = Geofront.create();
 
     // 设置选项测试
-    const result = await geofront.setOptions({
+    const result = geofront.setOptions({
       proxyProtocolIn: "none",
     });
     expect(result).toBe(0); // 应该返回成功状态码
@@ -50,7 +49,8 @@ describe("Geofront E2E Test: Standard Proxy", () => {
         remotePort: BACKEND_PORT,
       };
     });
-    await geofront.listen("0.0.0.0", PROXY_PORT);
+    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
+    expect(code).toBe(0); // 确保监听器启动成功
   });
 
   afterAll(async () => {

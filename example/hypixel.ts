@@ -25,11 +25,9 @@ async function main() {
   console.log("🌍 启动 Geofront Hypixel 代理示例");
   console.log("=".repeat(50));
 
-  const geofront = new Geofront();
-
   try {
-    // 初始化 Geofront
-    await geofront.initialize();
+    // 使用工厂方法创建 Geofront 实例
+    const geofront = Geofront.create();
     console.log("✓ Geofront 初始化完成");
 
     // 设置路由回调
@@ -80,8 +78,14 @@ async function main() {
     });
 
     // 启动监听器
-    await geofront.listen(PROXY_HOST, PROXY_PORT);
-    console.log(`✓ 代理服务器已启动: ${PROXY_HOST}:${PROXY_PORT}`);
+    const { code, listenerId } = geofront.listen(PROXY_HOST, PROXY_PORT);
+    if (code === 0) {
+      console.log(
+        `✓ 代理服务器已启动: ${PROXY_HOST}:${PROXY_PORT} (ID: ${listenerId})`
+      );
+    } else {
+      throw new Error(`启动监听器失败: code ${code}`);
+    }
 
     console.log("");
     console.log("🎮 代理服务器运行中！");
