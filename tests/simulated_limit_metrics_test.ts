@@ -12,8 +12,8 @@ import {
 	writeVarInt
 } from './helpers'
 
-describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
-	let geofront: Geofront
+describe('Geofront E2E Test: Rate Limiting and Metrics (New API)', () => {
+	let proxy: Geofront.GeofrontProxy
 	let backendServer: Server
 	let backendClosed: Promise<void>
 	let PROXY_PORT: number
@@ -38,20 +38,28 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 		backendServer = backend.server
 		backendClosed = backend.closed
 
-		geofront = Geofront.create()
+		proxy = Geofront.createProxy()
 
-		geofront.setRouter(() => {
+		proxy.setRouter(() => {
 			return {
-				remoteHost: TEST_CONSTANTS.BACKEND_HOST,
-				remotePort: BACKEND_PORT
+				target: {
+					host: TEST_CONSTANTS.BACKEND_HOST,
+					port: BACKEND_PORT
+				}
 			}
 		})
-		await geofront.listen('0.0.0.0', PROXY_PORT)
+		
+		const listener = await proxy.listen({
+			host: '0.0.0.0',
+			port: PROXY_PORT,
+			proxyProtocol: 'none'
+		})
+		expect(listener.id).toBeGreaterThan(0)
 	})
 
 	afterAll(async () => {
-		if (geofront) {
-			await geofront.shutdown()
+		if (proxy) {
+			await proxy.shutdown()
 		}
 		if (backendServer) {
 			backendServer.close()
@@ -111,11 +119,9 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 					loginSuccessReceived = true
 					gamePhase = true
 
-					// Find the connection object
-					for await (const conn of geofront.connections()) {
-						clientConnection = conn
-						break
-					}
+					// Find the connection object and set rate limit
+					const connections = proxy.getConnections()
+					clientConnection = connections.find(conn => conn.player === TEST_CONSTANTS.TEST_USERNAME)
 
 					if (!clientConnection) {
 						resolve({
@@ -125,11 +131,8 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 						return
 					}
 
-					// Apply rate limit
-					await clientConnection.limit({
-						sendAvgBytes: RATE_LIMIT_BPS,
-						sendBurstBytes: Math.floor(CHUNK_SIZE * 4) // Smaller burst for smoother sending
-					})
+					// Apply rate limit using new API
+					clientConnection.setRateLimit(Geofront.rateLimit(RATE_LIMIT_BPS / 1024 / 1024, undefined, 4)) // Convert to MB/s
 
 					// Start sending data at a fixed interval
 					const chunk = randomBytes(CHUNK_SIZE)
@@ -170,10 +173,8 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 
 				// If clientConnection is still not found, try to get it again.
 				if (!clientConnection) {
-					for await (const conn of geofront.connections()) {
-						clientConnection = conn
-						break
-					}
+					const connections = proxy.getConnections()
+					clientConnection = connections.find(conn => conn.player === TEST_CONSTANTS.TEST_USERNAME)
 				}
 
 				if (!clientConnection) {
@@ -186,9 +187,12 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 				}
 
 				// Log metrics periodically during the test
-				const logInterval = setInterval(async () => {
+				const logInterval = setInterval(() => {
+					// With new API, metrics are available through proxy.getMetrics()
+					const globalMetrics = proxy.getMetrics()
 					if (clientConnection) {
-						await geofront.updateMetrics()
+						const connMetrics = clientConnection.getMetrics()
+						// Optional: log current metrics
 					}
 				}, 1000)
 
@@ -204,15 +208,14 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 						return
 					}
 
-					// Update and get metrics BEFORE closing the connection
-					await geofront.updateMetrics()
-					const globalMetrics = geofront.metrics
-					const finalMetrics = globalMetrics.connections[clientConnection.id]
+					// Get metrics using new API
+					const globalMetrics = proxy.getMetrics()
+					const connMetrics = clientConnection.getMetrics()
 
-					if (!finalMetrics) {
+					if (!connMetrics) {
 						resolve({
 							success: false,
-							error: `Metrics for connection ${clientConnection.id} not found in global metrics.`
+							error: `Metrics for connection ${clientConnection.id} not found.`
 						})
 						client.end()
 						return
@@ -224,13 +227,12 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 					await new Promise(resolve => setTimeout(resolve, 1000))
 
 					// Get final global metrics after waiting for connection to close
-					await geofront.updateMetrics()
-					const finalGlobalMetrics = geofront.metrics
+					const finalGlobalMetrics = proxy.getMetrics()
 
 					resolve({
 						success: true,
 						finalMetrics: {
-							connection: finalMetrics,
+							connection: connMetrics,
 							global: finalGlobalMetrics,
 							totalSent,
 							receiveIntervals,
@@ -259,11 +261,11 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 		const tolerance = 0.2 // Allow 20% tolerance for timing inaccuracies and burst
 
 		// 1. Check connection metrics
-		// bytes_sent should be close to what the client sent, but capped by the limit.
+		// bytesSent should be close to what the client sent, but capped by the limit.
 		// Since we send slower than the limit, it should be close to totalSent.
 		// However, the proxy adds its own overhead, so we check if it's within a reasonable range.
 		console.log(`Client sent: ${clientTotalSent} bytes`)
-		console.log(`Connection metrics (sent): ${connMetrics.bytes_sent} bytes`)
+		console.log(`Connection metrics (sent): ${connMetrics.bytesSent} bytes`)
 		console.log(`Expected max bytes (limit): ${expectedMaxBytes} bytes`)
 
 		// 2. 分析接收数据的时间间隔来验证平滑限速
@@ -301,9 +303,9 @@ describe('Geofront E2E Test: Rate Limiting and Metrics', () => {
 
 		// 3. Check global metrics
 		// Global metrics should include the traffic from this connection.
-		expect(globalMetrics.total_bytes_sent).toBeGreaterThanOrEqual(
-			connMetrics.bytes_sent
+		expect(globalMetrics.traffic.totalBytesSent).toBeGreaterThanOrEqual(
+			connMetrics.bytesSent
 		)
-		expect(globalMetrics.active_conn).toBe(0) // Connection should be closed by now
+		expect(globalMetrics.connections.active).toBe(0) // Connection should be closed by now
 	}, 15000) // Increase timeout for this test
 })

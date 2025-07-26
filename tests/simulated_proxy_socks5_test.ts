@@ -13,8 +13,8 @@ import {
   writeVarInt,
 } from "./helpers";
 
-describe("Geofront E2E Test: SOCKS5 Proxy", () => {
-  let geofront: Geofront;
+describe("Geofront E2E Test: SOCKS5 Proxy (New API)", () => {
+  let proxy: Geofront.GeofrontProxy;
   let backendServer: Server;
   let backendClosed: Promise<void>;
   let socksServer: socks.SocksServer;
@@ -40,22 +40,32 @@ describe("Geofront E2E Test: SOCKS5 Proxy", () => {
     backendServer = backend.server;
     backendClosed = backend.closed;
 
-    // 启动 Geofront
-    geofront = Geofront.create();
-    geofront.setRouter((ip, host, player, protocol) => {
+    // 使用新的工厂方法创建代理
+    proxy = Geofront.createProxy();
+    proxy.setRouter((context) => {
       return {
-        remoteHost: TEST_CONSTANTS.BACKEND_HOST,
-        remotePort: BACKEND_PORT,
-        proxy: `socks5://127.0.0.1:${SOCKS_PORT}`,
+        target: {
+          host: TEST_CONSTANTS.BACKEND_HOST,
+          port: BACKEND_PORT,
+        },
+        proxy: {
+          url: `socks5://127.0.0.1:${SOCKS_PORT}`,
+          protocol: 1 as const
+        }
       };
     });
-    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
-    expect(code).toBe(0);
+    
+    const listener = await proxy.listen({
+      host: "0.0.0.0",
+      port: PROXY_PORT,
+      proxyProtocol: 'none'
+    });
+    expect(listener.id).toBeGreaterThan(0);
   });
 
   afterAll(async () => {
-    if (geofront) {
-      await geofront.shutdown();
+    if (proxy) {
+      await proxy.shutdown();
     }
     if (socksServer) {
       socksServer.close();

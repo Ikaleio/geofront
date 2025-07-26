@@ -100,8 +100,28 @@ export type MotdInput = z.input<typeof MotdInputSchema>;
 export type MotdType = z.infer<typeof MotdSchema>;
 export type PartialMotd = Partial<MotdType>;
 
-// MOTD 回调返回结果类型
-export type MotdResult = MotdInput | { disconnect: string };
+// MOTD 回调返回结果类型 - 新 API 风格
+export type MotdResult = {
+	readonly version: {
+		readonly name: string
+		readonly protocol?: number
+	}
+	readonly players: {
+		readonly max: number
+		readonly online?: number
+		readonly sample?: ReadonlyArray<{
+			readonly name: string
+			readonly id: string
+		}>
+	}
+	readonly description: {
+		readonly text: string
+	}
+	readonly favicon?: string
+}
+
+// 向后兼容的旧类型
+export type LegacyMotdResult = MotdInput | { disconnect: string };
 
 // 创建默认 MOTD
 export const createDefaultMotd = (): MotdType => ({

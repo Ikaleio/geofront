@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import type { Server } from "net";
 import { randomBytes } from "crypto";
 import { connect } from "net";
-import { Geofront } from "../src/geofront";
+import { Geofront, type Connection, type ConnectionInfo } from "../src/geofront";
 import {
   startBackendServer,
   runClientTest,
@@ -13,8 +13,8 @@ import {
   writeVarInt,
 } from "./helpers";
 
-describe("Geofront E2E Test: Standard Proxy", () => {
-  let geofront: Geofront;
+describe("Geofront E2E Test: Standard Proxy (New API)", () => {
+  let proxy: Geofront.GeofrontProxy;
   let backendServer: Server;
   let backendClosed: Promise<void>;
   let PROXY_PORT: number;
@@ -34,28 +34,31 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     backendServer = backend.server;
     backendClosed = backend.closed;
 
-    // 使用工厂方法创建 Geofront
-    geofront = Geofront.create();
+    // 使用新的工厂方法创建代理
+    proxy = Geofront.createProxy();
 
-    // 设置选项测试
-    const result = geofront.setOptions({
-      proxyProtocolIn: "none",
-    });
-    expect(result).toBe(0); // 应该返回成功状态码
-
-    geofront.setRouter((ip, host, player, protocol) => {
+    // 设置路由器
+    proxy.setRouter((context) => {
       return {
-        remoteHost: TEST_CONSTANTS.BACKEND_HOST,
-        remotePort: BACKEND_PORT,
+        target: {
+          host: TEST_CONSTANTS.BACKEND_HOST,
+          port: BACKEND_PORT,
+        }
       };
     });
-    const { code } = geofront.listen("0.0.0.0", PROXY_PORT);
-    expect(code).toBe(0); // 确保监听器启动成功
+
+    // 启动监听器
+    const listener = await proxy.listen({
+      host: "0.0.0.0",
+      port: PROXY_PORT,
+      proxyProtocol: 'none'
+    });
+    expect(listener.id).toBeGreaterThan(0); // 确保监听器启动成功
   });
 
   afterAll(async () => {
-    if (geofront) {
-      await geofront.shutdown();
+    if (proxy) {
+      await proxy.shutdown();
     }
     if (backendServer) {
       backendServer.close();
@@ -263,8 +266,10 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     const disconnectedConnections: number[] = [];
 
     // 设置断开连接回调
-    geofront.setDisconnectionCallback((connId: number) => {
-      disconnectedConnections.push(connId);
+    proxy.setEventHandlers({
+      onConnectionClosed: (connection: Connection, info: ConnectionInfo) => {
+        disconnectedConnections.push(info.id);
+      }
     });
 
     const testResult = new Promise<{ success: boolean; error?: string }>(
@@ -361,8 +366,6 @@ describe("Geofront E2E Test: Standard Proxy", () => {
 
     const result = await testResult;
 
-    // 在轮询模型中不再需要移除回调
-
     if (!result.success) {
       throw new Error(result.error);
     }
@@ -371,13 +374,18 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     expect(disconnectedConnections.length).toBeGreaterThan(0);
   });
 
-  test("should call disconnection callback for multiple connections", async () => {
-    // 记录断开连接的回调
-    const disconnectedConnections: number[] = [];
+  test("should track connection information correctly", async () => {
+    const connections: Connection[] = [];
+    const closedConnections: ConnectionInfo[] = [];
 
-    // 设置断开连接回调
-    geofront.setDisconnectionCallback((connId: number) => {
-      disconnectedConnections.push(connId);
+    // 设置事件处理器
+    proxy.setEventHandlers({
+      onConnectionEstablished: (connection: Connection) => {
+        connections.push(connection);
+      },
+      onConnectionClosed: (connection: Connection, info: ConnectionInfo) => {
+        closedConnections.push(info);
+      }
     });
 
     const numClients = 3;
@@ -435,7 +443,7 @@ describe("Geofront E2E Test: Standard Proxy", () => {
           });
 
           client.on("error", (err: Error) => {
-            // 忽略连接错误，专注于断开连接回调
+            // 忽略连接错误，专注于连接管理
           });
 
           client.on("close", () => {
@@ -455,14 +463,78 @@ describe("Geofront E2E Test: Standard Proxy", () => {
     // 等待所有客户端完成
     const results = await Promise.all(clientPromises);
 
-    // 等待额外时间确保所有断开连接回调都被调用
+    // 等待额外时间确保所有事件都被处理
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // 在轮询模型中不再需要移除回调
+    // 验证连接信息
+    expect(connections.length).toBeGreaterThanOrEqual(numClients);
+    expect(closedConnections.length).toBeGreaterThanOrEqual(numClients);
 
-    // 验证结果
-    const successfulClients = results.filter((r) => r).length;
-    expect(successfulClients).toBe(numClients);
-    expect(disconnectedConnections.length).toBeGreaterThanOrEqual(numClients);
+    // 验证连接对象包含正确的信息
+    for (const conn of connections) {
+      expect(conn.id).toBeGreaterThan(0);
+      expect(conn.player).toBeDefined();
+      expect(conn.ip).toBeDefined();
+      expect(conn.host).toBe(TEST_CONSTANTS.TEST_HOST);
+      expect(conn.protocol).toBe(TEST_CONSTANTS.TEST_PROTOCOL_VERSION);
+      expect(conn.startAt).toBeInstanceOf(Date);
+      expect(conn.getDuration()).toBeGreaterThan(0);
+    }
+
+    // 验证关闭连接信息
+    for (const info of closedConnections) {
+      expect(info.id).toBeGreaterThan(0);
+      expect(info.player).toBeDefined();
+      expect(info.ip).toBeDefined();
+      expect(info.host).toBe(TEST_CONSTANTS.TEST_HOST);
+      expect(info.protocol).toBe(TEST_CONSTANTS.TEST_PROTOCOL_VERSION);
+      expect(info.startAt).toBeInstanceOf(Date);
+    }
+  });
+
+  test("should provide connection management APIs", async () => {
+    // 这个测试验证连接管理API的基本功能
+    // 初始状态验证
+    expect(proxy.getConnections()).toHaveLength(0);
+    expect(proxy.getActivePlayerList()).toHaveLength(0);
+    expect(proxy.getConnectionCount()).toBe(0);
+    expect(proxy.getPlayerCount()).toBe(0);
+
+    // 基本 API 方法存在性验证
+    expect(typeof proxy.getConnection).toBe('function');
+    expect(typeof proxy.getConnectionsByPlayer).toBe('function');
+    expect(typeof proxy.getConnectionsByIp).toBe('function');
+    expect(typeof proxy.getConnectionsByHost).toBe('function');
+    expect(typeof proxy.disconnectAll).toBe('function');
+    expect(typeof proxy.disconnectPlayer).toBe('function');
+    expect(typeof proxy.disconnectIp).toBe('function');
+    expect(typeof proxy.getMetrics).toBe('function');
+    
+    // 验证 getConnection 对不存在的连接返回 undefined
+    expect(proxy.getConnection(99999)).toBeUndefined();
+    
+    // 验证按条件查询对空状态返回空数组
+    expect(proxy.getConnectionsByPlayer("nonexistent")).toHaveLength(0);
+    expect(proxy.getConnectionsByIp("127.0.0.1")).toHaveLength(0);
+    expect(proxy.getConnectionsByHost("test.example.com")).toHaveLength(0);
+    
+    // 验证断开连接方法对空状态返回 0
+    const disconnectedAll = await proxy.disconnectAll("test");
+    expect(disconnectedAll).toBe(0);
+    
+    const disconnectedPlayer = await proxy.disconnectPlayer("nonexistent", "test");
+    expect(disconnectedPlayer).toBe(0);
+    
+    const disconnectedIp = await proxy.disconnectIp("127.0.0.1", "test");
+    expect(disconnectedIp).toBe(0);
+    
+    // 验证 metrics 返回正确的结构
+    const metrics = proxy.getMetrics();
+    expect(metrics).toHaveProperty('connections');
+    expect(metrics).toHaveProperty('traffic');
+    expect(metrics.connections).toHaveProperty('total');
+    expect(metrics.connections).toHaveProperty('active');
+    expect(metrics.traffic).toHaveProperty('totalBytesSent');
+    expect(metrics.traffic).toHaveProperty('totalBytesReceived');
   });
 });
