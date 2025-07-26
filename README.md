@@ -77,8 +77,8 @@ async function main() {
         max: 100,
         online: onlineCount,
         sample: [
-          { name: `§a在线连接: §6${onlineCount}`, id: "00000000-0000-0000-0000-000000000000" },
-          { name: `§a玩家数量: §6${playerCount}`, id: "00000000-0000-0000-0000-000000000001" }
+          `§a在线连接: §6${onlineCount}`,
+          `§a玩家数量: §6${playerCount}`
         ]
       },
       description: {

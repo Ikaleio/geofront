@@ -112,7 +112,7 @@ export type MotdResult = {
 		readonly sample?: ReadonlyArray<{
 			readonly name: string
 			readonly id: string
-		}>
+		} | string>  // 支持字符串（自动生成UUID）或完整对象
 	}
 	readonly description: {
 		readonly text: string
