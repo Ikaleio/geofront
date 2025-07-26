@@ -352,7 +352,6 @@ fn cleanup_conn(conn_id: ProxyConnection) {
     // No need to manually call a callback here.
 
     CONN_MANAGER.lock().unwrap().remove(&conn_id);
-    RATE_LIMITERS.lock().unwrap().remove(&conn_id);
     CONN_METRICS.lock().unwrap().remove(&conn_id);
     ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
 }
@@ -381,7 +380,7 @@ async fn copy_bidirectional_with_metrics(
     let any_mut: &mut (dyn Any) = &mut **outbound;
     if let Some(outbound_tcp) = any_mut.downcast_mut::<TcpStream>() {
         // Both are TCP streams, we can use splice
-        let (a_to_b, b_to_a) = splice::zero_copy_bidirectional(inbound, outbound_tcp).await?;
+        let (a_to_b, b_to_a) = splice::copy_bidirectional(conn_id, inbound, outbound_tcp).await?;
 
         // Update metrics
         let conn_metrics = CONN_METRICS.lock().unwrap().get(&conn_id).cloned();
@@ -394,13 +393,13 @@ async fn copy_bidirectional_with_metrics(
 
         Ok((a_to_b, b_to_a))
     } else {
-        // Fallback for non-TCP streams (like SOCKS5)
-        copy_bidirectional_fallback(conn_id, inbound, outbound).await
+        // Fallback to standard copy for other stream types
+        return copy_bidirectional_fallback(conn_id, inbound, outbound).await;
     }
 }
 
 /// Fallback implementation using standard copy
-async fn copy_bidirectional_fallback<'a, A, B>(
+pub async fn copy_bidirectional_fallback<'a, A, B>(
     conn_id: ProxyConnection,
     a: &'a mut A,
     b: &'a mut B,
@@ -435,6 +434,7 @@ where
 
     let mut a_to_b_copied = 0;
     let mut b_to_a_copied = 0;
+    const CHUNK_SIZE: usize = 4096;
     let mut a_buf = [0u8; 4096];
     let mut b_buf = [0u8; 4096];
     let mut a_closed = false;
@@ -452,20 +452,21 @@ where
                         b.shutdown().await?;
                     }
                 } else {
-                    let mut remaining = n;
-                    let mut offset = 0;
-                    while remaining > 0 {
-                        let chunk_size = std::cmp::min(remaining, 1024);
-                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                    let mut processed = 0;
+                    while processed < n {
+                        let end = (processed + CHUNK_SIZE).min(n);
+                        let chunk = &a_buf[processed..end];
+                        // Rate limiting for sending (a to b)
+                        if let Some(num) = NonZeroU32::new(chunk.len() as u32) {
                             send_limiter.until_n_ready(num).await.unwrap();
                         }
-                        b.write_all(&a_buf[offset..offset + chunk_size]).await?;
-                        a_to_b_copied += chunk_size as u64;
-                        conn_metrics.bytes_sent.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        TOTAL_BYTES_SENT.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        offset += chunk_size;
-                        remaining -= chunk_size;
+                        b.write_all(chunk).await?;
+                        processed = end;
                     }
+
+                    a_to_b_copied += n as u64;
+                    conn_metrics.bytes_sent.fetch_add(n as u64, Ordering::SeqCst);
+                    TOTAL_BYTES_SENT.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             result = b.read(&mut b_buf), if !b_closed => {
@@ -476,20 +477,21 @@ where
                         a.shutdown().await?;
                     }
                 } else {
-                    let mut remaining = n;
-                    let mut offset = 0;
-                    while remaining > 0 {
-                        let chunk_size = std::cmp::min(remaining, 1024);
-                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                    let mut processed = 0;
+                    while processed < n {
+                        let end = (processed + CHUNK_SIZE).min(n);
+                        let chunk = &b_buf[processed..end];
+
+                        // Rate limiting for receiving (b to a)
+                        if let Some(num) = NonZeroU32::new(chunk.len() as u32) {
                             recv_limiter.until_n_ready(num).await.unwrap();
                         }
-                        a.write_all(&b_buf[offset..offset + chunk_size]).await?;
-                        b_to_a_copied += chunk_size as u64;
-                        conn_metrics.bytes_recv.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        TOTAL_BYTES_RECV.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        offset += chunk_size;
-                        remaining -= chunk_size;
+                        a.write_all(chunk).await?;
+                        processed = end;
                     }
+                    b_to_a_copied += n as u64;
+                    conn_metrics.bytes_recv.fetch_add(n as u64, Ordering::SeqCst);
+                    TOTAL_BYTES_RECV.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             else => {

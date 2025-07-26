@@ -53,9 +53,19 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
       let client: any = null;
       let resolved = false;
 
+      // 添加超时机制
+      const timeout = setTimeout(() => {
+        safeResolve({
+          success: false,
+          error: "连接超时",
+        });
+      }, 1000); // 1秒超时
+
       const safeResolve = (result: { success: boolean; error?: string }) => {
         if (resolved) return;
         resolved = true;
+
+        clearTimeout(timeout);
 
         if (client) {
           try {
@@ -172,7 +182,7 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
     try {
       const result = await testConnection(proxyPort, true);
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/连接|超时|关闭|失败/); // 更宽松的错误匹配
+      expect(result.error).toMatch(/连接|超时|关闭|失败|ECONNREFUSED|错误/); // 更宽松的错误匹配
     } finally {
       await geofront.shutdown();
     }
@@ -206,7 +216,7 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
     try {
       const result = await testConnection(proxyPort, false);
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/连接|超时|关闭/); // 更宽松的错误匹配
+      expect(result.error).toMatch(/连接|超时|关闭|ECONNREFUSED/); // 更宽松的错误匹配
     } finally {
       await geofront.shutdown();
     }

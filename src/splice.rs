@@ -3,12 +3,22 @@
 use std::future::poll_fn;
 use std::io::{Error, ErrorKind, Result};
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
+use std::sync::{Arc, atomic::Ordering};
 use std::task::{Context, Poll, ready};
 
+use governor::{
+    RateLimiter,
+    clock::DefaultClock,
+    state::{InMemoryState, direct::NotKeyed},
+};
 use libc;
 use tokio::io::{AsyncRead, AsyncWrite, Interest};
+
+use crate::state::{CONN_METRICS, RATE_LIMITERS, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT};
+use crate::types::{ConnMetrics, ProxyConnection};
 
 /// the size of PIPE_BUF
 const PIPE_SIZE: usize = 65536;
@@ -123,6 +133,11 @@ struct CopyBuffer<R, W> {
     cap: usize,
     amt: u64,
     buf: Pipe,
+    // Rate limiting and metrics
+    conn_metrics: Arc<ConnMetrics>,
+    send_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    recv_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    is_a_to_b: bool, // true if copying from A to B, false if B to A
     //
     _marker_r: PhantomData<R>,
     _marker_w: PhantomData<W>,
@@ -133,7 +148,13 @@ where
     R: Stream + Unpin,
     W: Stream + Unpin,
 {
-    fn new(buf: Pipe) -> Self {
+    fn new(
+        buf: Pipe,
+        conn_metrics: Arc<ConnMetrics>,
+        send_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+        recv_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+        is_a_to_b: bool,
+    ) -> Self {
         Self {
             read_done: false,
             need_flush: false,
@@ -141,6 +162,10 @@ where
             cap: 0,
             amt: 0,
             buf,
+            conn_metrics,
+            send_limiter,
+            recv_limiter,
+            is_a_to_b,
             _marker_r: PhantomData,
             _marker_w: PhantomData,
         }
@@ -205,7 +230,46 @@ where
             });
 
             match res {
-                Ok(_) => return Poll::Ready(res),
+                Ok(size) => {
+                    if size > 0 {
+                        // Apply rate limiting
+                        let limiter = if self.is_a_to_b {
+                            &self.send_limiter
+                        } else {
+                            &self.recv_limiter
+                        };
+
+                        if let Some(num) = NonZeroU32::new(size as u32) {
+                            // Note: This is a blocking operation within async context
+                            // In a real implementation, you might want to use a non-blocking approach
+                            match limiter.check_n(num) {
+                                Ok(_) => {
+                                    // Update metrics
+                                    if self.is_a_to_b {
+                                        self.conn_metrics
+                                            .bytes_sent
+                                            .fetch_add(size as u64, Ordering::SeqCst);
+                                        TOTAL_BYTES_SENT.fetch_add(size as u64, Ordering::SeqCst);
+                                    } else {
+                                        self.conn_metrics
+                                            .bytes_recv
+                                            .fetch_add(size as u64, Ordering::SeqCst);
+                                        TOTAL_BYTES_RECV.fetch_add(size as u64, Ordering::SeqCst);
+                                    }
+                                    return Poll::Ready(Ok(size));
+                                }
+                                Err(_) => {
+                                    // Rate limit exceeded, return pending to retry later
+                                    return Poll::Pending;
+                                }
+                            }
+                        } else {
+                            return Poll::Ready(Ok(size));
+                        }
+                    } else {
+                        return Poll::Ready(Ok(size));
+                    }
+                }
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock {
                         continue;
@@ -330,13 +394,49 @@ pub trait Stream: AsyncRead + AsyncWrite + AsRawFd {
 /// This function returns a future that will read from both streams,
 /// writing any data read to the opposing stream.
 /// This happens in both directions concurrently.
-pub async fn zero_copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> Result<(u64, u64)>
+pub async fn copy_bidirectional<A, B>(
+    conn_id: ProxyConnection,
+    a: &mut A,
+    b: &mut B,
+) -> Result<(u64, u64)>
 where
     A: Stream + Unpin,
     B: Stream + Unpin,
 {
-    let mut a_to_b = TransferState::Running(CopyBuffer::new(Pipe::new()?));
-    let mut b_to_a = TransferState::Running(CopyBuffer::new(Pipe::new()?));
+    // Get metrics and rate limiters for this connection
+    let conn_metrics = CONN_METRICS
+        .lock()
+        .unwrap()
+        .get(&conn_id)
+        .cloned()
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "Metrics not found for connection"))?;
+
+    let (send_limiter, recv_limiter) = RATE_LIMITERS
+        .lock()
+        .unwrap()
+        .get(&conn_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                "Rate limiters not found for connection",
+            )
+        })?;
+
+    let mut a_to_b = TransferState::Running(CopyBuffer::new(
+        Pipe::new()?,
+        conn_metrics.clone(),
+        send_limiter.clone(),
+        recv_limiter.clone(),
+        true, // is_a_to_b = true
+    ));
+    let mut b_to_a = TransferState::Running(CopyBuffer::new(
+        Pipe::new()?,
+        conn_metrics,
+        send_limiter,
+        recv_limiter,
+        false, // is_a_to_b = false
+    ));
 
     poll_fn(|cx| {
         let a_to_b = transfer_one_direction(cx, &mut a_to_b, a, b)?;

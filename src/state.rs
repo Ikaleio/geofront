@@ -2,7 +2,8 @@
 //! Global state management.
 
 use crate::types::{
-    ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState, MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
+    ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState,
+    MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
 };
 use governor::{
     RateLimiter,
@@ -33,7 +34,7 @@ lazy_static! {
     // Map to hold the senders for pending MOTD decisions
     pub static ref PENDING_MOTDS: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<MotdDecision>>> =
         std::sync::Mutex::new(HashMap::new());
-    
+
     // Thread-safe queues for polling-based approach (alternative to callbacks)
     pub static ref ROUTE_REQUEST_QUEUE: std::sync::Mutex<Vec<RouteRequest>> =
         std::sync::Mutex::new(Vec::new());
@@ -41,7 +42,7 @@ lazy_static! {
         std::sync::Mutex::new(Vec::new());
     pub static ref DISCONNECTION_EVENT_QUEUE: std::sync::Mutex<Vec<DisconnectionEvent>> =
         std::sync::Mutex::new(Vec::new());
-        
+
     pub static ref LISTENER_STATE: Arc<std::sync::Mutex<ListenerState>> =
         Arc::new(std::sync::Mutex::new(ListenerState::new()));
     pub static ref CONN_MANAGER: Arc<std::sync::Mutex<ConnectionManager>> =

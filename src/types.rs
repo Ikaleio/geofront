@@ -40,10 +40,35 @@ pub type ProxyConnection = u64;
 
 // Define a new trait that combines the required traits for our dynamic stream.
 use std::any::Any;
-pub trait AsyncStreamTrait: AsyncRead + AsyncWrite + Unpin + Send + Any {}
+use std::os::unix::io::AsRawFd;
+pub trait AsyncStreamTrait: AsyncRead + AsyncWrite + Unpin + Send + Any {
+    fn as_raw_fd_opt(&self) -> Option<std::os::unix::io::RawFd>;
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
 
 // Implement this trait for any type that satisfies the bounds. This is a "blanket implementation".
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncStreamTrait for T {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncStreamTrait for T {
+    fn as_raw_fd_opt(&self) -> Option<std::os::unix::io::RawFd> {
+        // Try to get raw fd if T implements AsRawFd
+        use std::any::TypeId;
+        if TypeId::of::<T>() == TypeId::of::<tokio::net::TcpStream>() {
+            // Safe cast because we checked the type
+            let tcp_stream = unsafe { &*(self as *const T as *const tokio::net::TcpStream) };
+            Some(tcp_stream.as_raw_fd())
+        } else {
+            None
+        }
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 // Use the new trait to define our dynamic stream type.
 pub type AsyncStream = dyn AsyncStreamTrait;
@@ -93,6 +118,14 @@ pub struct DisconnectionEvent {
     pub conn_id: ProxyConnection,
 }
 
+// Struct for batch polling events
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PollEvents {
+    pub route_requests: Vec<RouteRequest>,
+    pub motd_requests: Vec<MotdRequest>,
+    pub disconnection_events: Vec<DisconnectionEvent>,
+}
 
 // Per-connection metrics
 #[derive(Serialize)]
@@ -171,7 +204,6 @@ pub struct HandshakeData {
     #[allow(dead_code)]
     pub next_state: i32,
 }
-
 
 // MOTD decision structure
 #[derive(Serialize, Deserialize, Debug, Default)]
