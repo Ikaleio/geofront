@@ -14,10 +14,10 @@ if [[ -z "$msg" ]]; then
   exit 1
 fi
 
-if [[ "$msg" =~ ^docs: ]]; then
-  echo "docs: prefix detected -> run deployment"
+if [[ "$msg" =~ ^docs: || "$msg" =~ ^v[0-9]+\.[0-9]+\.[0-9]+($|\s) ]]; then
+  echo "docs: prefix detected or version tag detected -> run deployment"
   exit 1
 else
-  echo "Commit message does not start with docs: -> skip build"
+  echo "Commit message does not match criteria -> skip build"
   exit 0
 fi
