@@ -40,31 +40,50 @@ pub type ProxyConnection = u64;
 
 // Define a new trait that combines the required traits for our dynamic stream.
 use std::any::Any;
-use std::os::unix::io::AsRawFd;
+
+// Platform-specific raw IO handle imports / aliases
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
+
+#[cfg(unix)]
+pub type RawIoHandle = RawFd;
+#[cfg(windows)]
+pub type RawIoHandle = RawSocket;
+
+// A unified async stream trait with an optional method to extract the underlying raw handle.
+// On Windows this returns the socket, on Unix the file descriptor. Name kept for backward
+// compatibility even though it may return a socket on Windows.
 pub trait AsyncStreamTrait: AsyncRead + AsyncWrite + Unpin + Send + Any {
-    fn as_raw_fd_opt(&self) -> Option<std::os::unix::io::RawFd>;
+    fn as_raw_fd_opt(&self) -> Option<RawIoHandle>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 // Implement this trait for any type that satisfies the bounds. This is a "blanket implementation".
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncStreamTrait for T {
-    fn as_raw_fd_opt(&self) -> Option<std::os::unix::io::RawFd> {
-        // Try to get raw fd if T implements AsRawFd
+    fn as_raw_fd_opt(&self) -> Option<RawIoHandle> {
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<tokio::net::TcpStream>() {
-            // Safe cast because we checked the type
+            // Safe cast because we checked the concrete type id.
             let tcp_stream = unsafe { &*(self as *const T as *const tokio::net::TcpStream) };
-            Some(tcp_stream.as_raw_fd())
-        } else {
-            None
+            #[cfg(unix)]
+            {
+                return Some(tokio::net::TcpStream::as_raw_fd(tcp_stream));
+            }
+            #[cfg(windows)]
+            {
+                return Some(tokio::net::TcpStream::as_raw_socket(tcp_stream));
+            }
         }
+        None
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
