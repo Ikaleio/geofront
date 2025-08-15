@@ -890,7 +890,7 @@ export class GeofrontProxy {
 				cache: result.cache
 					? {
 							granularity:
-								result.cache.granularity === 'ip+host' ? 'IpHost' : 'Ip',
+								result.cache.granularity === 'ip+host' ? 'ipHost' : 'ip',
 							ttl: result.cache.ttl,
 							reject: result.cache.reject,
 							rejectReason: result.cache.rejectReason
@@ -948,7 +948,7 @@ export class GeofrontProxy {
 				cache: result.cache
 					? {
 							granularity:
-								result.cache.granularity === 'ip+host' ? 'IpHost' : 'Ip',
+								result.cache.granularity === 'ip+host' ? 'ipHost' : 'ip',
 							ttl: result.cache.ttl,
 							reject: result.cache.reject,
 							rejectReason: result.cache.rejectReason

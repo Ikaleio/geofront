@@ -100,7 +100,7 @@ interface RouteResult {
 	"proxy": "socks5://...",
 	"proxyProtocol": 1,
 	"rewriteHost": "backend.internal",
-	"cache": { "granularity": "IpHost", "ttl": 60000 }
+	"cache": { "granularity": "ipHost", "ttl": 60000 }
 }
 ```
 
