@@ -8,7 +8,7 @@ use crate::{
         ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE,
         LISTENER_COUNTER, LISTENER_STATE, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS,
         PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV,
-        TOTAL_BYTES_SENT, TOTAL_CONN,
+        TOTAL_BYTES_SENT, TOTAL_CONN, ROUTER_MOTD_CACHE,
     },
     types::{
         ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, MotdDecision,
@@ -523,6 +523,32 @@ pub unsafe extern "C" fn proxy_poll_events() -> *const c_char {
     };
 
     match serde_json::to_string(&events) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Clean up expired cache entries
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_cleanup_cache() -> ProxyError {
+    ROUTER_MOTD_CACHE.cleanup_expired();
+    info!("Cache cleanup completed");
+    PROXY_OK
+}
+
+/// Get cache statistics
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_get_cache_stats() -> *const c_char {
+    let stats = ROUTER_MOTD_CACHE.get_stats();
+    let stats_json = serde_json::json!({
+        "total_entries": stats.total_entries,
+        "expired_entries": stats.expired_entries
+    });
+    
+    match serde_json::to_string(&stats_json) {
         Ok(json_str) => match CString::new(json_str) {
             Ok(c_str) => c_str.into_raw(),
             Err(_) => ptr::null(),

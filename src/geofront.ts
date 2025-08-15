@@ -48,6 +48,12 @@ export interface RouteResult {
 	readonly rewrite?: {
 		readonly host: string
 	}
+	readonly cache?: {
+		readonly granularity: 'ip' | 'ip+host'
+		readonly ttl: number
+		readonly reject?: boolean
+		readonly rejectReason?: string
+	}
 }
 
 export interface MotdContext {
@@ -198,6 +204,14 @@ export const FFISymbols = {
 		returns: FFIType.void
 	},
 	proxy_poll_events: {
+		args: [],
+		returns: FFIType.pointer
+	},
+	proxy_cleanup_cache: {
+		args: [],
+		returns: FFIType.i32
+	},
+	proxy_get_cache_stats: {
 		args: [],
 		returns: FFIType.pointer
 	}
@@ -549,6 +563,31 @@ export class GeofrontProxy {
 		return this.shutdownInProgress
 	}
 	
+	// ===== 缓存管理 =====
+	cleanupCache(): void {
+		symbols.proxy_cleanup_cache()
+	}
+	
+	getCacheStats(): { totalEntries: number; expiredEntries: number } {
+		let statsPtr: Pointer | null = null
+		try {
+			statsPtr = symbols.proxy_get_cache_stats() as Pointer
+			if (statsPtr === 0) {
+				return { totalEntries: 0, expiredEntries: 0 }
+			}
+			const statsJson = new CString(statsPtr)
+			const stats = JSON.parse(statsJson.toString())
+			return {
+				totalEntries: stats.total_entries || 0,
+				expiredEntries: stats.expired_entries || 0
+			}
+		} finally {
+			if (statsPtr) {
+				symbols.proxy_free_string(statsPtr)
+			}
+		}
+	}
+	
 	// ===== 内部方法 =====
 	getCachedConnectionMetrics(connectionId: number): ConnectionMetrics {
 		return this.connectionMetricsCache.get(connectionId) || {
@@ -808,7 +847,18 @@ export class GeofrontProxy {
 			const motd = this.createMotdFromInput(validatedInput)
 			const builtMotd = buildMotd(motd, this.getConnectionCount(), request.protocol)
 			
-			const jsonResult = JSON.stringify(builtMotd)
+			// 添加缓存配置到最终结果
+			const finalResult = {
+				...builtMotd,
+				cache: result.cache ? {
+					granularity: result.cache.granularity === 'ip+host' ? 'IpHost' : 'Ip',
+					ttl: result.cache.ttl,
+					reject: result.cache.reject,
+					rejectReason: result.cache.rejectReason
+				} : undefined
+			}
+			
+			const jsonResult = JSON.stringify(finalResult)
 			symbols.proxy_submit_motd_decision(
 				BigInt(request.connId),
 				Buffer.from(jsonResult + '\0')
@@ -851,7 +901,13 @@ export class GeofrontProxy {
 				remotePort: result.target.port,
 				proxy: result.proxy?.url,
 				proxyProtocol: result.proxy?.protocol,
-				rewriteHost: result.rewrite?.host
+				rewriteHost: result.rewrite?.host,
+				cache: result.cache ? {
+					granularity: result.cache.granularity === 'ip+host' ? 'IpHost' : 'Ip',
+					ttl: result.cache.ttl,
+					reject: result.cache.reject,
+					rejectReason: result.cache.rejectReason
+				} : undefined
 			}
 		}
 		return result

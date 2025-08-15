@@ -86,6 +86,23 @@ pub struct RouteDecision {
     pub disconnect: Option<String>,
     #[serde(rename = "rewriteHost")]
     pub rewrite_host: Option<String>,
+    pub cache: Option<CacheConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CacheConfig {
+    pub granularity: CacheGranularity,
+    pub ttl: u64, // TTL in milliseconds
+    pub reject: Option<bool>,
+    #[serde(rename = "rejectReason")]
+    pub reject_reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheGranularity {
+    Ip,
+    IpHost,
 }
 
 // Struct for route requests (used in polling API)
@@ -213,6 +230,7 @@ pub struct MotdDecision {
     pub description: Option<serde_json::Value>, // Can be string or component object
     pub favicon: Option<String>,
     pub disconnect: Option<String>, // If present, disconnect with this message instead
+    pub cache: Option<CacheConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

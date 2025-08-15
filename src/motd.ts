@@ -118,6 +118,12 @@ export type MotdResult = {
 		readonly text: string
 	}
 	readonly favicon?: string
+	readonly cache?: {
+		readonly granularity: 'ip' | 'ip+host'
+		readonly ttl: number
+		readonly reject?: boolean
+		readonly rejectReason?: string
+	}
 }
 
 // 向后兼容的旧类型

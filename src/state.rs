@@ -5,6 +5,7 @@ use crate::types::{
     ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState,
     MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
 };
+use crate::cache::RouterMotdCache;
 use governor::{
     RateLimiter,
     clock::DefaultClock,
@@ -66,4 +67,7 @@ lazy_static! {
     pub static ref FFI_MOTD_LOCK: Mutex<()> = Mutex::new(());
     // This lock serializes all FFI calls to the disconnection callback to prevent concurrency issues.
     pub static ref FFI_DISCONNECTION_LOCK: Mutex<()> = Mutex::new(());
+    
+    // Router/MOTD cache instance
+    pub static ref ROUTER_MOTD_CACHE: RouterMotdCache = RouterMotdCache::new();
 }
