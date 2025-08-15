@@ -2,8 +2,10 @@
 //! Global state management.
 
 use crate::types::{
-    ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState, MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
+    ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState,
+    MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
 };
+use crate::cache::RouterMotdCache;
 use governor::{
     RateLimiter,
     clock::DefaultClock,
@@ -33,7 +35,7 @@ lazy_static! {
     // Map to hold the senders for pending MOTD decisions
     pub static ref PENDING_MOTDS: std::sync::Mutex<HashMap<ProxyConnection, oneshot::Sender<MotdDecision>>> =
         std::sync::Mutex::new(HashMap::new());
-    
+
     // Thread-safe queues for polling-based approach (alternative to callbacks)
     pub static ref ROUTE_REQUEST_QUEUE: std::sync::Mutex<Vec<RouteRequest>> =
         std::sync::Mutex::new(Vec::new());
@@ -41,7 +43,7 @@ lazy_static! {
         std::sync::Mutex::new(Vec::new());
     pub static ref DISCONNECTION_EVENT_QUEUE: std::sync::Mutex<Vec<DisconnectionEvent>> =
         std::sync::Mutex::new(Vec::new());
-        
+
     pub static ref LISTENER_STATE: Arc<std::sync::Mutex<ListenerState>> =
         Arc::new(std::sync::Mutex::new(ListenerState::new()));
     pub static ref CONN_MANAGER: Arc<std::sync::Mutex<ConnectionManager>> =
@@ -65,4 +67,7 @@ lazy_static! {
     pub static ref FFI_MOTD_LOCK: Mutex<()> = Mutex::new(());
     // This lock serializes all FFI calls to the disconnection callback to prevent concurrency issues.
     pub static ref FFI_DISCONNECTION_LOCK: Mutex<()> = Mutex::new(());
+    
+    // Router/MOTD cache instance
+    pub static ref ROUTER_MOTD_CACHE: RouterMotdCache = RouterMotdCache::new();
 }

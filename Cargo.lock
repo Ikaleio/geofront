@@ -184,6 +184,7 @@ name = "geofront"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "dashmap",
  "governor",
  "lazy_static",
  "libc",

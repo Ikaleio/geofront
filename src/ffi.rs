@@ -5,17 +5,15 @@ use crate::{
     connection::handle_conn,
     logging,
     state::{
-        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS,
-        DISCONNECTION_EVENT_QUEUE, LISTENER_COUNTER, LISTENER_STATE,
-        MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS, PENDING_ROUTES,
-        RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE,
-        TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, TOTAL_CONN,
+        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE,
+        LISTENER_COUNTER, LISTENER_STATE, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS,
+        PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV,
+        TOTAL_BYTES_SENT, TOTAL_CONN, ROUTER_MOTD_CACHE,
     },
     types::{
-        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot,
-        MotdDecision, PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND,
-        PROXY_OK, ProxyConnection, ProxyError, ProxyListener,
-        RouteDecision,
+        ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, MotdDecision,
+        PROXY_ERR_BAD_PARAM, PROXY_ERR_INTERNAL, PROXY_ERR_NOT_FOUND, PROXY_OK, PollEvents,
+        ProxyConnection, ProxyError, ProxyListener, RouteDecision,
     },
 };
 use governor::{Quota, RateLimiter};
@@ -91,7 +89,6 @@ pub unsafe extern "C" fn proxy_set_log_level(level: *const c_char) -> ProxyError
     }
 }
 
-
 /// Submits the routing decision from JS back to Rust.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn proxy_submit_routing_decision(
@@ -135,8 +132,6 @@ pub unsafe extern "C" fn proxy_submit_routing_decision(
 
     PROXY_OK
 }
-
-
 
 /// Submits the MOTD decision from JS back to Rust.
 #[unsafe(no_mangle)]
@@ -335,7 +330,21 @@ pub unsafe extern "C" fn proxy_shutdown() -> ProxyError {
     // The new polling mechanism handles disconnection events.
     // No need to manually call callbacks here.
 
+    // Clear all state
     CONN_METRICS.lock().unwrap().clear();
+    RATE_LIMITERS.lock().unwrap().clear();
+    PENDING_ROUTES.lock().unwrap().clear();
+    PENDING_MOTDS.lock().unwrap().clear();
+    ROUTE_REQUEST_QUEUE.lock().unwrap().clear();
+    MOTD_REQUEST_QUEUE.lock().unwrap().clear();
+    DISCONNECTION_EVENT_QUEUE.lock().unwrap().clear();
+
+    // Reset counters
+    CONN_COUNTER.store(0, Ordering::SeqCst);
+    ACTIVE_CONN.store(0, Ordering::SeqCst);
+    TOTAL_BYTES_SENT.store(0, Ordering::SeqCst);
+    TOTAL_BYTES_RECV.store(0, Ordering::SeqCst);
+
     PROXY_OK
 }
 
@@ -438,7 +447,7 @@ pub unsafe extern "C" fn proxy_poll_route_request() -> *const c_char {
     if queue.is_empty() {
         return ptr::null();
     }
-    
+
     let request = queue.remove(0);
     match serde_json::to_string(&request) {
         Ok(json_str) => match CString::new(json_str) {
@@ -458,7 +467,7 @@ pub unsafe extern "C" fn proxy_poll_motd_request() -> *const c_char {
     if queue.is_empty() {
         return ptr::null();
     }
-    
+
     let request = queue.remove(0);
     match serde_json::to_string(&request) {
         Ok(json_str) => match CString::new(json_str) {
@@ -478,9 +487,68 @@ pub unsafe extern "C" fn proxy_poll_disconnection_event() -> *const c_char {
     if queue.is_empty() {
         return ptr::null();
     }
-    
+
     let event = queue.remove(0);
     match serde_json::to_string(&event) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Batch polling for all event types (route requests, MOTD requests, disconnection events)
+/// Returns NULL if no pending events, otherwise returns JSON with all events
+/// The caller is responsible for freeing the returned string using `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_poll_events() -> *const c_char {
+    let mut route_queue = ROUTE_REQUEST_QUEUE.lock().unwrap();
+    let mut motd_queue = MOTD_REQUEST_QUEUE.lock().unwrap();
+    let mut disconnection_queue = DISCONNECTION_EVENT_QUEUE.lock().unwrap();
+
+    let route_requests = route_queue.drain(..).collect::<Vec<_>>();
+    let motd_requests = motd_queue.drain(..).collect::<Vec<_>>();
+    let disconnection_events = disconnection_queue.drain(..).collect::<Vec<_>>();
+
+    // If no events at all, return null
+    if route_requests.is_empty() && motd_requests.is_empty() && disconnection_events.is_empty() {
+        return ptr::null();
+    }
+
+    let events = PollEvents {
+        route_requests,
+        motd_requests,
+        disconnection_events,
+    };
+
+    match serde_json::to_string(&events) {
+        Ok(json_str) => match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null(),
+        },
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Clean up expired cache entries
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_cleanup_cache() -> ProxyError {
+    ROUTER_MOTD_CACHE.cleanup_expired();
+    info!("Cache cleanup completed");
+    PROXY_OK
+}
+
+/// Get cache statistics
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_get_cache_stats() -> *const c_char {
+    let stats = ROUTER_MOTD_CACHE.get_stats();
+    let stats_json = serde_json::json!({
+        "total_entries": stats.total_entries,
+        "expired_entries": stats.expired_entries
+    });
+    
+    match serde_json::to_string(&stats_json) {
         Ok(json_str) => match CString::new(json_str) {
             Ok(c_str) => c_str.into_raw(),
             Err(_) => ptr::null(),

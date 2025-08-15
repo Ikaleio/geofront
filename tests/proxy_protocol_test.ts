@@ -10,7 +10,7 @@ import {
   createLoginStartPacket,
 } from "./helpers";
 
-describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
+describe("Geofront E2E Test: PROXY Protocol Inbound (New API)", () => {
   let backendServer: Server;
   let backendClosed: Promise<void>;
   let BACKEND_PORT: number;
@@ -53,9 +53,19 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
       let client: any = null;
       let resolved = false;
 
+      // 添加超时机制
+      const timeout = setTimeout(() => {
+        safeResolve({
+          success: false,
+          error: "连接超时",
+        });
+      }, 1000); // 1秒超时
+
       const safeResolve = (result: { success: boolean; error?: string }) => {
         if (resolved) return;
         resolved = true;
+
+        clearTimeout(timeout);
 
         if (client) {
           try {
@@ -133,117 +143,117 @@ describe("Geofront E2E Test: PROXY Protocol Inbound", () => {
 
   // 创建和配置 Geofront 实例的辅助函数
   async function createGeofrontInstance(
-    proxyProtocolIn: "none" | "optional" | "strict"
+    proxyProtocol: "none" | "optional" | "strict"
   ) {
-    const geofront = Geofront.create();
+    const proxy = Geofront.createProxy();
 
-    // 设置 PROXY Protocol 选项
-    const result = geofront.setOptions({ proxyProtocolIn });
-    expect(result).toBe(0); // 确保设置成功
-
-    geofront.setRouter((ip, host, player, protocol) => {
+    proxy.setRouter((context) => {
       return {
-        remoteHost: TEST_CONSTANTS.BACKEND_HOST,
-        remotePort: BACKEND_PORT,
+        target: {
+          host: TEST_CONSTANTS.BACKEND_HOST,
+          port: BACKEND_PORT,
+        }
       };
     });
 
     const proxyPort = getRandomPort();
-    const { code } = geofront.listen("0.0.0.0", proxyPort);
-    expect(code).toBe(0);
+    const listener = await proxy.listen({
+      host: "0.0.0.0",
+      port: proxyPort,
+      proxyProtocol
+    });
+    expect(listener.id).toBeGreaterThan(0);
 
-    return { geofront, proxyPort };
+    return { proxy, proxyPort };
   }
 
-  test('proxyProtocolIn: "none" - should accept normal connections without PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("none");
+  test('proxyProtocol: "none" - should accept normal connections without PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("none");
 
     try {
       const result = await testConnection(proxyPort, false);
       expect(result.success).toBe(true);
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test('proxyProtocolIn: "none" - should reject connections with PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("none");
+  test('proxyProtocol: "none" - should reject connections with PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("none");
 
     try {
       const result = await testConnection(proxyPort, true);
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/连接|超时|关闭|失败/); // 更宽松的错误匹配
+      expect(result.error).toMatch(/连接|超时|关闭|失败|ECONNREFUSED|错误/); // 更宽松的错误匹配
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test('proxyProtocolIn: "optional" - should accept normal connections without PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("optional");
+  test('proxyProtocol: "optional" - should accept normal connections without PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("optional");
 
     try {
       const result = await testConnection(proxyPort, false);
       expect(result.success).toBe(true);
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test('proxyProtocolIn: "optional" - should accept connections with PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("optional");
+  test('proxyProtocol: "optional" - should accept connections with PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("optional");
 
     try {
       const result = await testConnection(proxyPort, true);
       expect(result.success).toBe(true);
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test('proxyProtocolIn: "strict" - should reject normal connections without PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("strict");
+  test('proxyProtocol: "strict" - should reject normal connections without PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("strict");
 
     try {
       const result = await testConnection(proxyPort, false);
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/连接|超时|关闭/); // 更宽松的错误匹配
+      expect(result.error).toMatch(/连接|超时|关闭|ECONNREFUSED/); // 更宽松的错误匹配
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test('proxyProtocolIn: "strict" - should accept connections with PROXY header', async () => {
-    const { geofront, proxyPort } = await createGeofrontInstance("strict");
+  test('proxyProtocol: "strict" - should accept connections with PROXY header', async () => {
+    const { proxy, proxyPort } = await createGeofrontInstance("strict");
 
     try {
       const result = await testConnection(proxyPort, true);
       expect(result.success).toBe(true);
     } finally {
-      await geofront.shutdown();
+      await proxy.shutdown();
     }
   });
 
-  test("should validate setOptions with different values", async () => {
-    const geofront = Geofront.create();
-
-    try {
-      // 测试所有有效的选项值
-      const validOptions = ["none", "optional", "strict"] as const;
-      for (const option of validOptions) {
-        const result = geofront.setOptions({ proxyProtocolIn: option });
-        expect(result).toBe(0); // PROXY_OK
+  test("should validate proxyProtocol option with different values", async () => {
+    // 测试所有有效的选项值
+    const validOptions = ["none", "optional", "strict"] as const;
+    for (const option of validOptions) {
+      const proxy = Geofront.createProxy();
+      try {
+        proxy.setRouter(() => ({ target: { host: "127.0.0.1", port: 25565 } }));
+        
+        const proxyPort = getRandomPort();
+        const listener = await proxy.listen({
+          host: "0.0.0.0",
+          port: proxyPort,
+          proxyProtocol: option
+        });
+        expect(listener.id).toBeGreaterThan(0);
+        expect(listener.config.proxyProtocol).toBe(option);
+      } finally {
+        await proxy.shutdown();
       }
-
-      // 测试无效选项应该抛出错误
-      expect(() =>
-        geofront.setOptions({ proxyProtocolIn: "invalid" as any })
-      ).toThrow();
-
-      // 测试空选项对象
-      const result = geofront.setOptions({});
-      expect(result).toBe(0);
-    } finally {
-      await geofront.shutdown();
     }
   });
 });

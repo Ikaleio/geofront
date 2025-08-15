@@ -6,11 +6,11 @@ use crate::{
     state::{
         ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE, FFI_MOTD_LOCK,
         FFI_ROUTER_LOCK, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS,
-        ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
+        ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, ROUTER_MOTD_CACHE,
     },
     types::{
         AsyncStream, DisconnectionEvent, HandshakeData, MotdDecision, MotdRequest, ProxyConnection,
-        ProxyProtocolIn, RouteDecision, RouteRequest,
+        ProxyProtocolIn, RouteDecision, RouteRequest, CacheGranularity,
     },
 };
 use ppp::PartialResult;
@@ -198,6 +198,35 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
                 .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string())
         });
 
+    // Check cache first for routing
+    if let Some(cached_entry) = ROUTER_MOTD_CACHE.get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
+        .or_else(|| ROUTER_MOTD_CACHE.get(&peer_ip, None, &CacheGranularity::Ip))
+    {
+        info!(conn = conn_id, "Route cache hit for {}@{}@{}", username, peer_ip, hs.host);
+        
+        if cached_entry.is_rejection {
+            let disconnect_msg = cached_entry.reject_reason
+                .unwrap_or_else(|| "Connection blocked by cache".to_string());
+            let _ = write_disconnect(&mut inbound, &disconnect_msg).await;
+            cleanup_conn(conn_id);
+            return;
+        }
+        
+        // Use cached route data
+        if let Ok(cached_route) = serde_json::from_value::<RouteDecision>(cached_entry.data) {
+            // Apply cached route decision (same logic as below)
+            if let Some(disconnect_msg) = cached_route.disconnect {
+                let _ = write_disconnect(&mut inbound, &disconnect_msg).await;
+                cleanup_conn(conn_id);
+                return;
+            }
+            
+            // Continue with cached route processing - extract remaining logic here
+            info!(conn = conn_id, "Applying cached route decision");
+            // For now, just continue to main logic to avoid duplication
+        }
+    }
+
     // Asynchronously get the routing decision.
     let route_decision = match get_route_info(conn_id, &hs, &username, &peer_ip).await {
         Ok(decision) => decision,
@@ -210,16 +239,30 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     };
 
     // Custom reject
-    if let Some(disconnect_msg) = route_decision.disconnect {
-        let _ = write_disconnect(&mut inbound, &disconnect_msg).await;
+    if let Some(disconnect_msg) = &route_decision.disconnect {
+        // Cache rejection if cache config is provided
+        if let Some(cache_config) = &route_decision.cache {
+            let cache_data = serde_json::to_value(&route_decision).unwrap_or_default();
+            ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
+            info!(conn = conn_id, "Cached route rejection for {}@{}@{}", username, peer_ip, hs.host);
+        }
+        
+        let _ = write_disconnect(&mut inbound, disconnect_msg).await;
         cleanup_conn(conn_id);
         return;
     }
 
+    // Cache successful route result if cache config is provided
+    if let Some(cache_config) = &route_decision.cache {
+        let cache_data = serde_json::to_value(&route_decision).unwrap_or_default();
+        ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
+        info!(conn = conn_id, "Cached route result for {}@{}@{}", username, peer_ip, hs.host);
+    }
+
     // Rewrite host if specified
     let mut hs_for_rewrite = hs.clone(); // Clone for potential modification
-    if let Some(new_host) = route_decision.rewrite_host {
-        hs_for_rewrite.host = new_host;
+    if let Some(new_host) = &route_decision.rewrite_host {
+        hs_for_rewrite.host = new_host.clone();
     }
 
     // Re-serialize the packets to be forwarded, using the potentially modified handshake.
@@ -352,7 +395,6 @@ fn cleanup_conn(conn_id: ProxyConnection) {
     // No need to manually call a callback here.
 
     CONN_MANAGER.lock().unwrap().remove(&conn_id);
-    RATE_LIMITERS.lock().unwrap().remove(&conn_id);
     CONN_METRICS.lock().unwrap().remove(&conn_id);
     ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
 }
@@ -381,7 +423,7 @@ async fn copy_bidirectional_with_metrics(
     let any_mut: &mut (dyn Any) = &mut **outbound;
     if let Some(outbound_tcp) = any_mut.downcast_mut::<TcpStream>() {
         // Both are TCP streams, we can use splice
-        let (a_to_b, b_to_a) = splice::zero_copy_bidirectional(inbound, outbound_tcp).await?;
+        let (a_to_b, b_to_a) = splice::copy_bidirectional(conn_id, inbound, outbound_tcp).await?;
 
         // Update metrics
         let conn_metrics = CONN_METRICS.lock().unwrap().get(&conn_id).cloned();
@@ -394,13 +436,13 @@ async fn copy_bidirectional_with_metrics(
 
         Ok((a_to_b, b_to_a))
     } else {
-        // Fallback for non-TCP streams (like SOCKS5)
-        copy_bidirectional_fallback(conn_id, inbound, outbound).await
+        // Fallback to standard copy for other stream types
+        return copy_bidirectional_fallback(conn_id, inbound, outbound).await;
     }
 }
 
 /// Fallback implementation using standard copy
-async fn copy_bidirectional_fallback<'a, A, B>(
+pub async fn copy_bidirectional_fallback<'a, A, B>(
     conn_id: ProxyConnection,
     a: &'a mut A,
     b: &'a mut B,
@@ -435,6 +477,7 @@ where
 
     let mut a_to_b_copied = 0;
     let mut b_to_a_copied = 0;
+    const CHUNK_SIZE: usize = 4096;
     let mut a_buf = [0u8; 4096];
     let mut b_buf = [0u8; 4096];
     let mut a_closed = false;
@@ -452,20 +495,21 @@ where
                         b.shutdown().await?;
                     }
                 } else {
-                    let mut remaining = n;
-                    let mut offset = 0;
-                    while remaining > 0 {
-                        let chunk_size = std::cmp::min(remaining, 1024);
-                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                    let mut processed = 0;
+                    while processed < n {
+                        let end = (processed + CHUNK_SIZE).min(n);
+                        let chunk = &a_buf[processed..end];
+                        // Rate limiting for sending (a to b)
+                        if let Some(num) = NonZeroU32::new(chunk.len() as u32) {
                             send_limiter.until_n_ready(num).await.unwrap();
                         }
-                        b.write_all(&a_buf[offset..offset + chunk_size]).await?;
-                        a_to_b_copied += chunk_size as u64;
-                        conn_metrics.bytes_sent.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        TOTAL_BYTES_SENT.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        offset += chunk_size;
-                        remaining -= chunk_size;
+                        b.write_all(chunk).await?;
+                        processed = end;
                     }
+
+                    a_to_b_copied += n as u64;
+                    conn_metrics.bytes_sent.fetch_add(n as u64, Ordering::SeqCst);
+                    TOTAL_BYTES_SENT.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             result = b.read(&mut b_buf), if !b_closed => {
@@ -476,20 +520,21 @@ where
                         a.shutdown().await?;
                     }
                 } else {
-                    let mut remaining = n;
-                    let mut offset = 0;
-                    while remaining > 0 {
-                        let chunk_size = std::cmp::min(remaining, 1024);
-                        if let Some(num) = NonZeroU32::new(chunk_size as u32) {
+                    let mut processed = 0;
+                    while processed < n {
+                        let end = (processed + CHUNK_SIZE).min(n);
+                        let chunk = &b_buf[processed..end];
+
+                        // Rate limiting for receiving (b to a)
+                        if let Some(num) = NonZeroU32::new(chunk.len() as u32) {
                             recv_limiter.until_n_ready(num).await.unwrap();
                         }
-                        a.write_all(&b_buf[offset..offset + chunk_size]).await?;
-                        b_to_a_copied += chunk_size as u64;
-                        conn_metrics.bytes_recv.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        TOTAL_BYTES_RECV.fetch_add(chunk_size as u64, Ordering::SeqCst);
-                        offset += chunk_size;
-                        remaining -= chunk_size;
+                        a.write_all(chunk).await?;
+                        processed = end;
                     }
+                    b_to_a_copied += n as u64;
+                    conn_metrics.bytes_recv.fetch_add(n as u64, Ordering::SeqCst);
+                    TOTAL_BYTES_RECV.fetch_add(n as u64, Ordering::SeqCst);
                 }
             },
             else => {
@@ -648,6 +693,28 @@ async fn handle_status_request(
                 .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string())
         });
 
+    // Check cache first for MOTD
+    if let Some(cached_entry) = ROUTER_MOTD_CACHE.get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
+        .or_else(|| ROUTER_MOTD_CACHE.get(&peer_ip, None, &CacheGranularity::Ip))
+    {
+        info!(conn = conn_id, "MOTD cache hit for {}@{}", peer_ip, hs.host);
+        
+        if cached_entry.is_rejection {
+            let disconnect_msg = cached_entry.reject_reason
+                .unwrap_or_else(|| "Connection blocked by cache".to_string());
+            let _ = write_disconnect(inbound, &disconnect_msg).await;
+            return;
+        }
+        
+        // Use cached MOTD data
+        if let Ok(cached_motd) = serde_json::from_value::<MotdDecision>(cached_entry.data) {
+            if let Err(e) = send_status_response(inbound, &cached_motd, hs.protocol_version).await {
+                error!(conn = conn_id, "Failed to send cached status response: {}", e);
+            }
+            return;
+        }
+    }
+
     // Get MOTD decision from callback
     let motd_decision = match get_motd_info(conn_id, hs, &peer_ip).await {
         Ok(decision) => decision,
@@ -669,14 +736,29 @@ async fn handle_status_request(
                 })),
                 favicon: None,
                 disconnect: None,
+                cache: None,
             }
         }
     };
 
     // Check if we should disconnect
-    if let Some(disconnect_msg) = motd_decision.disconnect {
-        let _ = write_disconnect(inbound, &disconnect_msg).await;
+    if let Some(disconnect_msg) = &motd_decision.disconnect {
+        // Cache rejection if cache config is provided
+        if let Some(cache_config) = &motd_decision.cache {
+            let cache_data = serde_json::to_value(&motd_decision).unwrap_or_default();
+            ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
+            info!(conn = conn_id, "Cached MOTD rejection for {}@{}", peer_ip, hs.host);
+        }
+        
+        let _ = write_disconnect(inbound, disconnect_msg).await;
         return;
+    }
+
+    // Cache successful MOTD result if cache config is provided
+    if let Some(cache_config) = &motd_decision.cache {
+        let cache_data = serde_json::to_value(&motd_decision).unwrap_or_default();
+        ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
+        info!(conn = conn_id, "Cached MOTD result for {}@{}", peer_ip, hs.host);
     }
 
     // Build and send status response

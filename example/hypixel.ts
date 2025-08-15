@@ -1,133 +1,161 @@
 /**
- * Hypixel 代理示例
+ * Hypixel 代理示例 - 简化版本
  *
- * 这个示例展示如何使用 Geofront 创建一个 Hypixel 代理服务器，
- * 包含路由和 MOTD 功能。
+ * 这个示例展示如何使用 Geofront API 创建一个简单的 Hypixel 代理，
+ * 包含基本的路由、MOTD 和连接管理功能。
  *
  * 运行方式：
  * ```bash
- * bun run example/hypixel.ts
+ * bun dev example/hypixel.ts  # 开发模式
+ * bun run example/hypixel.ts  # 生产模式
  * ```
- *
- * 然后在 Minecraft 客户端中连接到 localhost:32768
  */
 
-import { Geofront } from "../src/geofront";
-import type { MotdResult } from "../src/motd";
+import { Geofront, type RouteContext, type MotdContext } from '../src/geofront'
 
 // 配置
-const PROXY_HOST = "0.0.0.0";
-const PROXY_PORT = 32768;
-const HYPIXEL_HOST = "mc.hypixel.net";
-const HYPIXEL_PORT = 25565;
+const PROXY_HOST = '0.0.0.0'
+const PROXY_PORT = 32768
+const HYPIXEL_HOST = 'mc.hypixel.net'
+const HYPIXEL_PORT = 25565
 
 async function main() {
-  console.log("🌍 启动 Geofront Hypixel 代理示例");
-  console.log("=".repeat(50));
+	console.log('🚀 启动 Geofront Hypixel 代理')
+	console.log('='.repeat(40))
 
-  try {
-    // 使用工厂方法创建 Geofront 实例
-    const geofront = Geofront.create();
-    console.log("✓ Geofront 初始化完成");
+	// 创建代理实例
+	const proxy = Geofront.createProxy()
+	console.log('✓ 代理实例已创建')
 
-    // 设置路由回调
-    geofront.setRouter((ip, host, player, protocol) => {
-      console.log(
-        `[Router] 新连接: ${player}@${ip} -> ${host} (协议: ${protocol})`
-      );
+	// 设置路由器 - 将所有连接路由到 Hypixel
+	proxy.setRouter((context: RouteContext) => {
+		console.log(`[路由] ${context.username}@${context.ip} -> Hypixel`)
 
-      // 将所有连接路由到 Hypixel
-      return {
-        remoteHost: HYPIXEL_HOST,
-        remotePort: HYPIXEL_PORT,
-        rewriteHost: HYPIXEL_HOST, // 重写主机名以确保正确路由
-      };
-    });
-    console.log("✓ 路由回调已设置");
+		// 简单的连接数限制
+		const playerConnections = proxy.getConnectionsByPlayer(context.username)
+		if (playerConnections.length >= 3) {
+			return Geofront.disconnect('§c你已有太多连接，请先断开其他连接')
+		}
 
-    // 设置 MOTD 回调
-    // 注意：MOTD 回调在客户端请求服务器状态时触发（服务器列表显示）
-    geofront.setMotdCallback((ip, host, protocol) => {
-      console.log(`[MOTD] 状态请求: ${ip} -> ${host} (协议: ${protocol})`);
+		// 路由到 Hypixel
+		return {
+			target: {
+				host: HYPIXEL_HOST,
+				port: HYPIXEL_PORT
+			},
+			rewrite: {
+				host: HYPIXEL_HOST // 重写握手包中的主机名
+			}
+		}
+	})
 
-      const motd: MotdResult = {
-        version: {
-          name: "Geofront -> Hypixel",
-          protocol: protocol,
-        },
-        players: {
-          max: 100000,
-          online: "auto", // 自动获取在线玩家数
-          sample: [
-            "§6Geofront Proxy",
-            "§aMade by Ikaleio",
-            "§7Built with Rust + TypeScript",
-          ],
-        },
-        description: {
-          text: "§6§lGeofront Proxy §r§7-> §b§lHypixel Network\n§7高性能 Minecraft 代理服务器",
-        },
-      };
-      return motd;
-    });
-    console.log("✓ MOTD 回调已设置");
+	// 设置 MOTD - 显示简单的服务器信息
+	proxy.setMotdProvider((context: MotdContext) => {
+		const onlineCount = proxy.getConnectionCount()
+		const playerCount = proxy.getPlayerCount()
 
-    // 设置断开连接回调
-    geofront.setDisconnectionCallback((connId) => {
-      console.log(`🔌 连接 ${connId} 已断开`);
-    });
+		return {
+			version: {
+				name: 'Geofront',
+				protocol: context.protocol
+			},
+			players: {
+				max: 100000,
+				online: 50000 + Math.floor(Math.random() * 10000), // 模拟 Hypixel 在线人数
+				sample: [
+					'§6§lHypixel 加速代理',
+					`§a当前用户: §6${onlineCount} 人`,
+					'§b低延迟稳定连接'
+				]
+			},
+			description: {
+				text: '§6§lHYPIXEL 加速代理\n§7Geofront Example'
+			}
+		}
+	})
 
-    // 启动监听器
-    const { code, listenerId } = geofront.listen(PROXY_HOST, PROXY_PORT);
-    if (code === 0) {
-      console.log(
-        `✓ 代理服务器已启动: ${PROXY_HOST}:${PROXY_PORT} (ID: ${listenerId})`
-      );
-    } else {
-      throw new Error(`启动监听器失败: code ${code}`);
-    }
+	// 设置事件处理器
+	proxy.setEventHandlers({
+		onConnectionEstablished: connection => {
+			console.log(`✅ [连接] ${connection.player}@${connection.ip}`)
+		},
 
-    console.log("");
-    console.log("🎮 代理服务器运行中！");
-    console.log(`📍 在 Minecraft 客户端中连接到: localhost:${PROXY_PORT}`);
-    console.log("🎯 所有连接将被转发到 Hypixel Network");
-    console.log("📊 MOTD 将显示自定义信息");
-    console.log("");
-    console.log("按 Ctrl+C 停止服务器");
+		onConnectionClosed: (connection, info) => {
+			const metrics = connection.getMetrics()
+			const duration = connection.getDurationString()
+			const totalTraffic =
+				(metrics.bytesSent + metrics.bytesReceived) / 1024 / 1024
 
-    // 优雅关闭处理
-    const shutdown = async () => {
-      console.log("");
-      console.log("🛑 正在关闭代理服务器...");
+			console.log(
+				`❌ [断开] ${
+					info.player
+				} | 时长: ${duration} | 流量: ${totalTraffic.toFixed(2)}MB`
+			)
+		},
 
-      try {
-        await geofront.shutdown();
-        console.log("✓ 代理服务器已安全关闭");
-      } catch (err) {
-        console.error("❌ 关闭时出错:", err);
-      }
+		onError: error => {
+			console.error(`🚨 [错误] ${error.message}`)
+		}
+	})
 
-      process.exit(0);
-    };
+	// 启动代理
+	const listener = await proxy.listen({
+		host: PROXY_HOST,
+		port: PROXY_PORT,
+		proxyProtocol: 'none'
+	})
 
-    // 监听终止信号
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+	console.log(
+		`✅ Hypixel 代理已启动: ${listener.config.host}:${listener.config.port}`
+	)
+	console.log(`🎯 目标服务器: ${HYPIXEL_HOST}:${HYPIXEL_PORT}`)
+	console.log('🎮 现在可以连接到代理服务器了！')
+	console.log('按 Ctrl+C 停止服务器')
 
-    // 保持进程运行
-    await new Promise(() => {}); // 永远等待
-  } catch (error) {
-    console.error("❌ 启动失败:", error);
-    process.exit(1);
-  }
+	// 简单的状态输出
+	setInterval(() => {
+		const metrics = proxy.getMetrics()
+		const playerList = proxy.getActivePlayerList()
+
+		if (metrics.connections.active > 0) {
+			console.log(
+				`📊 活跃连接: ${metrics.connections.active} | 玩家: ${playerList.length}`
+			)
+			if (playerList.length > 0) {
+				console.log(
+					`   在线玩家: ${playerList.slice(0, 5).join(', ')}${
+						playerList.length > 5 ? '...' : ''
+					}`
+				)
+			}
+		}
+	}, 30000) // 每30秒输出一次状态
+
+	// 优雅关闭
+	process.on('SIGINT', async () => {
+		console.log('\n🛑 正在关闭代理...')
+
+		const finalMetrics = proxy.getMetrics()
+		if (finalMetrics.connections.active > 0) {
+			console.log(
+				`📊 关闭时统计: ${finalMetrics.connections.active} 个活跃连接`
+			)
+			await proxy.disconnectAll('§e代理服务器正在关闭，请稍后重新连接')
+		}
+
+		await proxy.shutdown()
+		console.log('✅ 代理已关闭')
+		process.exit(0)
+	})
+
+	// 保持运行
+	await new Promise(() => {})
 }
 
-// 启动示例
-if (import.meta.main) {
-  main().catch((error) => {
-    console.error("❌ 未处理的错误:", error);
-    process.exit(1);
-  });
-}
+// 错误处理
+main().catch(error => {
+	console.error('❌ 启动失败:', error)
+	process.exit(1)
+})
 
-export { main };
+export { main }
