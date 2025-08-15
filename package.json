@@ -13,7 +13,11 @@
 		"build:no-rust": "bun run build.mjs --no-rust",
 		"dev:build": "cargo build",
 		"dev": "NODE_ENV=development bun run",
-		"dev:test": "NODE_ENV=development bun test --bail"
+		"dev:test": "NODE_ENV=development bun test --bail",
+		"docs:dev": "vitepress dev docs",
+		"docs:build": "vitepress build docs",
+		"docs:start": "vitepress preview docs",
+		"docs:clean": "rm -rf docs/.vitepress/dist docs/.vitepress/cache"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
@@ -21,7 +25,9 @@
 		"bun-types": "latest",
 		"cpr": "^3.0.1",
 		"socksv5": "^0.0.6",
-		"typescript": "^5"
+		"typescript": "^5",
+		"vitepress": "^1.3.0",
+		"vitepress-plugin-llms": "^1.7.3"
 	},
 	"type": "module",
 	"peerDependencies": {

@@ -13,6 +13,25 @@ yarn-error.log*
 # Build output
 /dist
 
+# VitePress docs build/cache
+docs/.vitepress/dist
+docs/.vitepress/cache
+
+# Vercel deployment metadata
+.vercel
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+
 # IDE / Editor
 .vscode
 /.claude
