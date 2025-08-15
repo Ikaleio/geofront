@@ -79,7 +79,8 @@ TS 回调返回的新式结构：
 ```ts
 interface RouteResult {
 	target: { host: string; port: number }
-	proxy?: { url: string; protocol?: 1 | 2 }
+	proxy?: { url: string }
+	proxyProtocol?: 1 | 2 // 向后端写入 PROXY Protocol 版本（v1 或 v2）
 	rewrite?: { host: string }
 	cache?: {
 		granularity: 'ip' | 'ip+host'

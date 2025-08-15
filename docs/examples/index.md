@@ -64,7 +64,8 @@ proxy.setMotdProvider(ctx => ({
 ```ts
 proxy.setRouter(ctx => ({
 	target: { host: 'mc.hypixel.net', port: 25565 },
-	proxy: { url: 'socks5://proxy.example.com:1080', protocol: 1 },
+	proxy: { url: 'socks5://proxy.example.com:1080' },
+	proxyProtocol: 1,
 	rewrite: { host: 'mc.hypixel.net' }
 }))
 ```

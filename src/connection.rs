@@ -6,11 +6,11 @@ use crate::{
     state::{
         ACTIVE_CONN, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE, FFI_MOTD_LOCK,
         FFI_ROUTER_LOCK, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS,
-        ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, ROUTER_MOTD_CACHE,
+        ROUTE_REQUEST_QUEUE, ROUTER_MOTD_CACHE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT,
     },
     types::{
-        AsyncStream, DisconnectionEvent, HandshakeData, MotdDecision, MotdRequest, ProxyConnection,
-        ProxyProtocolIn, RouteDecision, RouteRequest, CacheGranularity,
+        AsyncStream, CacheGranularity, DisconnectionEvent, HandshakeData, MotdDecision,
+        MotdRequest, ProxyConnection, ProxyProtocolIn, RouteDecision, RouteRequest,
     },
 };
 use ppp::PartialResult;
@@ -199,19 +199,24 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
         });
 
     // Check cache first for routing
-    if let Some(cached_entry) = ROUTER_MOTD_CACHE.get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
+    if let Some(cached_entry) = ROUTER_MOTD_CACHE
+        .get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
         .or_else(|| ROUTER_MOTD_CACHE.get(&peer_ip, None, &CacheGranularity::Ip))
     {
-        info!(conn = conn_id, "Route cache hit for {}@{}@{}", username, peer_ip, hs.host);
-        
+        info!(
+            conn = conn_id,
+            "Route cache hit for {}@{}@{}", username, peer_ip, hs.host
+        );
+
         if cached_entry.is_rejection {
-            let disconnect_msg = cached_entry.reject_reason
+            let disconnect_msg = cached_entry
+                .reject_reason
                 .unwrap_or_else(|| "Connection blocked by cache".to_string());
             let _ = write_disconnect(&mut inbound, &disconnect_msg).await;
             cleanup_conn(conn_id);
             return;
         }
-        
+
         // Use cached route data
         if let Ok(cached_route) = serde_json::from_value::<RouteDecision>(cached_entry.data) {
             // Apply cached route decision (same logic as below)
@@ -220,7 +225,7 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
                 cleanup_conn(conn_id);
                 return;
             }
-            
+
             // Continue with cached route processing - extract remaining logic here
             info!(conn = conn_id, "Applying cached route decision");
             // For now, just continue to main logic to avoid duplication
@@ -244,9 +249,12 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
         if let Some(cache_config) = &route_decision.cache {
             let cache_data = serde_json::to_value(&route_decision).unwrap_or_default();
             ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
-            info!(conn = conn_id, "Cached route rejection for {}@{}@{}", username, peer_ip, hs.host);
+            info!(
+                conn = conn_id,
+                "Cached route rejection for {}@{}@{}", username, peer_ip, hs.host
+            );
         }
-        
+
         let _ = write_disconnect(&mut inbound, disconnect_msg).await;
         cleanup_conn(conn_id);
         return;
@@ -256,7 +264,10 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     if let Some(cache_config) = &route_decision.cache {
         let cache_data = serde_json::to_value(&route_decision).unwrap_or_default();
         ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
-        info!(conn = conn_id, "Cached route result for {}@{}@{}", username, peer_ip, hs.host);
+        info!(
+            conn = conn_id,
+            "Cached route result for {}@{}@{}", username, peer_ip, hs.host
+        );
     }
 
     // Rewrite host if specified
@@ -594,7 +605,8 @@ fn request_route_info(conn_id: ProxyConnection, hs: &HandshakeData, username: &s
         conn_id,
         peer_ip: peer_ip.to_string(),
         port: hs.port,
-        protocol: hs.protocol_version as u32,
+        // 协议版本现改为 i32 直传，保持与握手一致
+        protocol: hs.protocol_version,
         host: hs.host.clone(),
         username: username.to_string(),
     };
@@ -694,22 +706,27 @@ async fn handle_status_request(
         });
 
     // Check cache first for MOTD
-    if let Some(cached_entry) = ROUTER_MOTD_CACHE.get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
+    if let Some(cached_entry) = ROUTER_MOTD_CACHE
+        .get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
         .or_else(|| ROUTER_MOTD_CACHE.get(&peer_ip, None, &CacheGranularity::Ip))
     {
         info!(conn = conn_id, "MOTD cache hit for {}@{}", peer_ip, hs.host);
-        
+
         if cached_entry.is_rejection {
-            let disconnect_msg = cached_entry.reject_reason
+            let disconnect_msg = cached_entry
+                .reject_reason
                 .unwrap_or_else(|| "Connection blocked by cache".to_string());
             let _ = write_disconnect(inbound, &disconnect_msg).await;
             return;
         }
-        
+
         // Use cached MOTD data
         if let Ok(cached_motd) = serde_json::from_value::<MotdDecision>(cached_entry.data) {
             if let Err(e) = send_status_response(inbound, &cached_motd, hs.protocol_version).await {
-                error!(conn = conn_id, "Failed to send cached status response: {}", e);
+                error!(
+                    conn = conn_id,
+                    "Failed to send cached status response: {}", e
+                );
             }
             return;
         }
@@ -747,9 +764,12 @@ async fn handle_status_request(
         if let Some(cache_config) = &motd_decision.cache {
             let cache_data = serde_json::to_value(&motd_decision).unwrap_or_default();
             ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
-            info!(conn = conn_id, "Cached MOTD rejection for {}@{}", peer_ip, hs.host);
+            info!(
+                conn = conn_id,
+                "Cached MOTD rejection for {}@{}", peer_ip, hs.host
+            );
         }
-        
+
         let _ = write_disconnect(inbound, disconnect_msg).await;
         return;
     }
@@ -758,7 +778,10 @@ async fn handle_status_request(
     if let Some(cache_config) = &motd_decision.cache {
         let cache_data = serde_json::to_value(&motd_decision).unwrap_or_default();
         ROUTER_MOTD_CACHE.set(&peer_ip, Some(&hs.host), cache_data, cache_config);
-        info!(conn = conn_id, "Cached MOTD result for {}@{}", peer_ip, hs.host);
+        info!(
+            conn = conn_id,
+            "Cached MOTD result for {}@{}", peer_ip, hs.host
+        );
     }
 
     // Build and send status response
@@ -891,7 +914,8 @@ fn request_motd_info(conn_id: ProxyConnection, hs: &HandshakeData, peer_ip: &str
         conn_id,
         peer_ip: peer_ip.to_string(),
         port: hs.port,
-        protocol: hs.protocol_version as u32,
+        // 协议版本使用 i32
+        protocol: hs.protocol_version,
         host: hs.host.clone(),
     };
     MOTD_REQUEST_QUEUE.lock().unwrap().push(motd_request);

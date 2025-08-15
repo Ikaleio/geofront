@@ -131,7 +131,8 @@ pub struct RouteRequest {
     pub conn_id: ProxyConnection,
     pub peer_ip: String,
     pub port: u16,
-    pub protocol: u32,
+    // Minecraft 协议版本：应使用有符号 i32 以保持与握手解析一致
+    pub protocol: i32,
     pub host: String,
     pub username: String,
 }
@@ -143,7 +144,8 @@ pub struct MotdRequest {
     pub conn_id: ProxyConnection,
     pub peer_ip: String,
     pub port: u16,
-    pub protocol: u32,
+    // Minecraft 协议版本：与 RouteRequest 一致使用 i32
+    pub protocol: i32,
     pub host: String,
 }
 

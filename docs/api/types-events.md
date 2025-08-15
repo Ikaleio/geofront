@@ -29,7 +29,8 @@ interface RouteContext {
 // 用途：只包含决定路由所需最小信息；可以基于 host / ip / username 做分流与限流判定。
 interface RouteResult {
 	target: { host: string; port: number }
-	proxy?: { url: string; protocol?: 1 | 2 }
+	proxy?: { url: string }
+	proxyProtocol?: 1 | 2
 	rewrite?: { host: string }
 	cache?: {
 		granularity: 'ip' | 'ip+host'
