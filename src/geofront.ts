@@ -339,8 +339,8 @@ export class GeofrontProxy {
 		traffic: { totalBytesSent: 0, totalBytesReceived: 0 }
 	}
 	
-	private pollingInterval: Timer | null = null
-	private metricsInterval: Timer | null = null
+	private pollingInterval: ReturnType<typeof setInterval> | null = null
+	private metricsInterval: ReturnType<typeof setInterval> | null = null
 	private pollingEnabled = false
 	private polling = false
 	
@@ -476,7 +476,7 @@ export class GeofrontProxy {
 	}
 	
 	async disconnectAll(reason?: string): Promise<number> {
-		const count = symbols.proxy_kick_all()
+		const count = Number(symbols.proxy_kick_all())
 		this.connections.clear()
 		return count
 	}

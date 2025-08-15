@@ -67,6 +67,9 @@ const result = await Bun.build({
     splitting: true,
     sourcemap: 'external',
     minify: true,
+    loader: {
+        '.txt': 'text'
+    },
 });
 
 if (!result.success) {
