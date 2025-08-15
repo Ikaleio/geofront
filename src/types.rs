@@ -120,7 +120,9 @@ pub struct CacheConfig {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum CacheGranularity {
+    /// IP 级粒度。JSON: "ip"。
     Ip,
+    /// IP + Host 级粒度。JSON: "ipHost"。
     IpHost,
 }
 

@@ -21,4 +21,5 @@ url = "2.5.4"
 
 [lib]
 name = "geofront"
-crate-type = ["cdylib"]
+# Provide both cdylib for FFI (Bun) and rlib for internal tests
+crate-type = ["cdylib", "rlib"]
