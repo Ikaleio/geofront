@@ -705,6 +705,16 @@ async fn handle_status_request(
                 .map_or_else(|_| "0.0.0.0".to_string(), |addr| addr.ip().to_string())
         });
 
+    // 新增: 记录 status 请求的入站信息
+    info!(
+        conn = conn_id,
+        peer_ip = %peer_ip,
+        target_host = %hs.host,
+        target_port = hs.port,
+        protocol = hs.protocol_version,
+        "MOTD request received"
+    );
+
     // Check cache first for MOTD
     if let Some(cached_entry) = ROUTER_MOTD_CACHE
         .get(&peer_ip, Some(&hs.host), &CacheGranularity::IpHost)
@@ -745,7 +755,7 @@ async fn handle_status_request(
                 }),
                 players: Some(crate::types::MotdPlayers {
                     max: 20,
-                    online: 0,
+                    online: Some(0),
                     sample: vec![],
                 }),
                 description: Some(serde_json::json!({
@@ -825,7 +835,7 @@ async fn send_status_response(
                 .map(|p| p.max)
                 .unwrap_or(20),
             "online": motd_decision.players.as_ref()
-                .map(|p| p.online)
+                .and_then(|p| p.online)
                 .unwrap_or(0),
             "sample": motd_decision.players.as_ref()
                 .map(|p| &p.sample)
@@ -914,10 +924,8 @@ fn request_motd_info(conn_id: ProxyConnection, hs: &HandshakeData, peer_ip: &str
         conn_id,
         peer_ip: peer_ip.to_string(),
         port: hs.port,
-        // 协议版本使用 i32
         protocol: hs.protocol_version,
         host: hs.host.clone(),
     };
     MOTD_REQUEST_QUEUE.lock().unwrap().push(motd_request);
-    info!(conn = conn_id, "MOTD request queued for polling.");
 }
