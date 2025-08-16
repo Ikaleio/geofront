@@ -61,7 +61,7 @@ if (!noRust) {
 // 4. Bundle TypeScript source files with Bun
 console.log('Bundling TypeScript files with Bun...');
 const result = await Bun.build({
-    entrypoints: ['src/geofront.ts'],
+    entrypoints: ['src/geofront.ts', 'src/cli.ts'],
     outdir: './dist',
     target: 'bun',
     splitting: true,

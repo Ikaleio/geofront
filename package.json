@@ -5,6 +5,9 @@
 	"description": "A high-performance Minecraft proxy core built with Rust and Bun FFI.",
 	"main": "dist/geofront.js",
 	"types": "dist/geofront.d.ts",
+	"bin": {
+		"geofront": "dist/cli.js"
+	},
 	"files": [
 		"dist"
 	],
@@ -22,6 +25,7 @@
 	"devDependencies": {
 		"@types/bun": "latest",
 		"@types/uuid": "^10.0.0",
+		"@types/yargs": "^17.0.32",
 		"bun-types": "latest",
 		"cpr": "^3.0.1",
 		"socksv5": "^0.0.6",
@@ -37,6 +41,7 @@
 		"comlink": "^4.4.2",
 		"mc-chat-format": "^1.2.2",
 		"uuid": "^11.1.0",
-		"zod": "^4.0.5"
+		"zod": "^4.0.5",
+		"yargs": "^17.7.2"
 	}
 }

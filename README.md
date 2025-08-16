@@ -179,3 +179,96 @@ main().catch(console.error)
 ## 📄 许可证
 
 MIT License - 详见 [LICENSE](./LICENSE) 文件。
+
+## 🛠 CLI (实验特性)
+
+自带一个现代化命令行工具 `geofront`，便于用声明式参数快速启动入口代理，无需手写脚本。
+
+### 安装与调用
+
+```bash
+bun install geofront-ts
+npx geofront --help        # 或 bunx geofront --help
+```
+
+### 快速示例
+
+```bash
+geofront \
+	--listen 0.0.0.0:25565 \
+	--route 'mc.example.com->10.0.0.5:25565' \
+	--route '*.pvp.example.com->10.0.0.6:25565,pp=1,rewrite=mc.example.com' \
+	--rate-limit-up 20 --rate-limit-down 20
+```
+
+### 参数说明
+
+| 参数                                        | 描述                                                       |
+| ------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `--listen ip:port[,proxyProtocol=optional   | strict                                                     | none]`                                                                                                                        | 添加一个监听器，可重复出现。`proxyProtocol` 仅影响入站解析。 |
+| `--route pattern->host:port[,proxy=URL,pp=1 | 2,rewrite=HOST]`                                           | 添加路由规则；`pattern` 支持精确或 glob (`*`/`?`/`[]`)。`pp` 为向后端写入的 PROXY Protocol 版本。`rewrite` 为握手 Host 重写。 |
+| `--config file.json`                        | 从 JSON 文件批量加载配置（见下）。命令行与文件配置会合并。 |
+| `--rate-limit-up N` / `--rate-limit-down N` | 全局上传/下载限速 (MB/s)。                                 |
+| `--burst M`                                 | 速率限制突发倍数（默认 2）。                               |
+| `--metrics-interval S`                      | 每 S 秒输出一次 metrics（0 关闭，默认 15）。               |
+| `--quiet`                                   | 静默模式，不输出周期 metrics。                             |
+
+### 路由语法
+
+```
+pattern->backendHost:backendPort[,proxy=...,pp=1|2,rewrite=...]
+```
+
+示例：
+
+```
+--route 'mc.example.com->10.0.0.5:25565'
+--route '*.edge.example.com->10.0.0.10:25565,proxy=socks5://127.0.0.1:1080,pp=2,rewrite=mc.example.com'
+```
+
+### JSON 配置文件格式 (`--config`)
+
+```jsonc
+{
+	"listeners": [
+		{ "host": "0.0.0.0", "port": 25565, "proxyProtocol": "optional" }
+	],
+	"routes": [
+		{
+			"pattern": "mc.example.com",
+			"target": { "host": "10.0.0.5", "port": 25565 },
+			"proxy": "socks5://127.0.0.1:1080",
+			"proxyProtocol": 1,
+			"rewriteHost": "mc.example.com"
+		}
+	],
+	"rateLimit": { "uploadMBps": 50, "downloadMBps": 50 }
+}
+```
+
+命令行与文件合并逻辑：
+
+- 监听器: 追加合并。
+- 路由: 追加合并（按出现顺序匹配，先精确后 glob）。
+- 限速: 命令行覆盖文件。
+
+### 匹配优先级
+
+1. 精确匹配 (`pattern` 不含通配符) 按声明顺序。
+2. glob 匹配 按声明顺序。
+3. 未匹配 → 断开，理由 `Unknown host`。
+
+### PROXY Protocol 说明
+
+- 入站：监听器 `proxyProtocol` 控制是否解析客户端前置的 PROXY v1/v2 头。
+- 出站：路由字段 `pp=1|2`（或 JSON `proxyProtocol`）指示向后端写入对应版本头。
+
+### 重写 Host
+
+`rewrite=backend.host` 将握手中的 `server address` 写入为指定值（常用于绕过后端直连检测）。
+
+### 退出
+
+Ctrl+C 触发优雅关停，调用 `proxy.shutdown()` 释放资源。
+
+> 该 CLI 为实验特性：未来可能扩展支持热加载、YAML、动态路由脚本等。
