@@ -14,7 +14,12 @@ use crate::{
     },
 };
 use ppp::PartialResult;
-use std::{net::SocketAddr, num::NonZeroU32, sync::atomic::Ordering};
+use std::{
+    io::{Cursor, Error, ErrorKind},
+    net::SocketAddr,
+    num::NonZeroU32,
+    sync::atomic::Ordering,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -180,8 +185,8 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
     }
 
     // Continue with login flow (state 2)
-    let username = match protocol::parse_login_start(&mut inbound).await {
-        Ok(u) => u,
+    let (login_packet, username) = match read_login_packet(&mut inbound).await {
+        Ok(res) => res,
         Err(e) => {
             error!(conn = conn_id, "Login failed: {}", e);
             cleanup_conn(conn_id);
@@ -270,15 +275,15 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
         );
     }
 
-    // Rewrite host if specified
-    let mut hs_for_rewrite = hs.clone(); // Clone for potential modification
+    // Rewrite host/port if specified
+    let mut hs_for_rewrite = hs.clone();
     if let Some(new_host) = &route_decision.rewrite_host {
         hs_for_rewrite.host = new_host.clone();
     }
+    hs_for_rewrite.port = route_decision.remote_port.unwrap_or(hs.port);
 
-    // Re-serialize the packets to be forwarded, using the potentially modified handshake.
+    // Re-serialize the handshake with updated fields.
     let handshake_packet = create_handshake_packet(&hs_for_rewrite);
-    let login_packet = create_login_start_packet(&username);
 
     // Establish outbound connection
     let backend = format!(
@@ -615,6 +620,82 @@ fn request_route_info(conn_id: ProxyConnection, hs: &HandshakeData, username: &s
 
 /// --- Packet Serialization Helpers ---
 
+async fn read_login_packet<R>(stream: &mut R) -> std::io::Result<(Vec<u8>, String)>
+where
+    R: AsyncReadExt + Unpin,
+{
+    // Read packet length VarInt while storing bytes
+    let mut len_bytes = Vec::new();
+    let mut num_read = 0;
+    let mut length = 0usize;
+    loop {
+        let byte = stream.read_u8().await?;
+        len_bytes.push(byte);
+        let value = (byte & 0x7f) as usize;
+        length |= value << (7 * num_read);
+        num_read += 1;
+        if num_read > 5 {
+            return Err(Error::new(ErrorKind::InvalidData, "VarInt too big"));
+        }
+        if (byte & 0x80) == 0 {
+            break;
+        }
+    }
+
+    // Read payload bytes
+    let mut payload = vec![0u8; length];
+    stream.read_exact(&mut payload).await?;
+
+    // Parse username from payload
+    let mut cursor = Cursor::new(&payload[..]);
+    let packet_id = read_varint_from_cursor(&mut cursor)?;
+    if packet_id != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid login start packet ID",
+        ));
+    }
+    let username = read_string_from_cursor(&mut cursor)?;
+
+    // Reconstruct full packet
+    let mut full_packet = len_bytes;
+    full_packet.extend_from_slice(&payload);
+    Ok((full_packet, username))
+}
+
+fn read_varint_from_cursor(cursor: &mut Cursor<&[u8]>) -> std::io::Result<i32> {
+    let mut num_read = 0;
+    let mut result = 0;
+    loop {
+        let mut buf = [0u8; 1];
+        std::io::Read::read_exact(cursor, &mut buf)?;
+        let byte = buf[0];
+        let value = (byte & 0x7f) as i32;
+        result |= value << (7 * num_read);
+        num_read += 1;
+        if num_read > 5 {
+            return Err(Error::new(ErrorKind::InvalidData, "VarInt too big"));
+        }
+        if (byte & 0x80) == 0 {
+            break;
+        }
+    }
+    Ok(result)
+}
+
+fn read_string_from_cursor(cursor: &mut Cursor<&[u8]>) -> std::io::Result<String> {
+    let len = read_varint_from_cursor(cursor)? as usize;
+    if len > 262144 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "String length exceeds limit",
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    std::io::Read::read_exact(cursor, &mut buf)?;
+    String::from_utf8(buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+}
+
 fn write_varint(mut value: i32) -> Vec<u8> {
     let mut buf = Vec::new();
     loop {
@@ -645,16 +726,6 @@ fn create_handshake_packet(hs: &HandshakeData) -> Vec<u8> {
     data.extend(write_string(&hs.host));
     data.extend(&hs.port.to_be_bytes());
     data.extend(write_varint(hs.next_state));
-
-    let mut packet = write_varint(data.len() as i32);
-    packet.extend(data);
-    packet
-}
-
-fn create_login_start_packet(username: &str) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.extend(write_varint(0x00)); // packet id
-    data.extend(write_string(username));
 
     let mut packet = write_varint(data.len() as i32);
     packet.extend(data);
