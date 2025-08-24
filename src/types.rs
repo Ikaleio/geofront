@@ -265,12 +265,15 @@ pub struct MotdVersion {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MotdPlayers {
     pub max: i32,
-    pub online: i32,
+    #[serde(default)]
+    pub online: Option<i32>,
+    #[serde(default)]
     pub sample: Vec<MotdPlayerSample>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct MotdPlayerSample {
-    pub name: String,
-    pub id: String,
+#[serde(untagged)]
+pub enum MotdPlayerSample {
+    Full { name: String, id: String },
+    Name(String),
 }
