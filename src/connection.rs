@@ -435,11 +435,32 @@ async fn copy_bidirectional_with_metrics(
     use std::any::Any;
     use tokio::net::TcpStream;
 
+    let requires_fallback = {
+        let guard = RATE_LIMITERS.lock().unwrap();
+        guard
+            .get(&conn_id)
+            .map(|limiters| limiters.limited)
+            .unwrap_or(true)
+    };
+
+    if requires_fallback {
+        return copy_bidirectional_fallback(conn_id, inbound, outbound).await;
+    }
+
     // Attempt to downcast to TcpStream for zero-copy.
     let any_mut: &mut (dyn Any) = &mut **outbound;
     if let Some(outbound_tcp) = any_mut.downcast_mut::<TcpStream>() {
         // Both are TCP streams, we can use splice
-        let (a_to_b, b_to_a) = splice::copy_bidirectional(conn_id, inbound, outbound_tcp).await?;
+        let (a_to_b, b_to_a) =
+            match splice::copy_bidirectional(conn_id, inbound, outbound_tcp).await {
+                Ok(res) => res,
+                Err(err) => {
+                    if err.kind() == std::io::ErrorKind::Other {
+                        return copy_bidirectional_fallback(conn_id, inbound, outbound).await;
+                    }
+                    return Err(err);
+                }
+            };
 
         // Update metrics
         let conn_metrics = CONN_METRICS.lock().unwrap().get(&conn_id).cloned();
@@ -479,7 +500,7 @@ where
             )
         })?;
 
-    let (send_limiter, recv_limiter) = RATE_LIMITERS
+    let limiters = RATE_LIMITERS
         .lock()
         .unwrap()
         .get(&conn_id)
@@ -490,6 +511,8 @@ where
                 "Rate limiters not found for connection",
             )
         })?;
+    let send_limiter = limiters.send;
+    let recv_limiter = limiters.recv;
 
     let mut a_to_b_copied = 0;
     let mut b_to_a_copied = 0;

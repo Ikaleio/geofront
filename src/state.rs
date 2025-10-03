@@ -1,11 +1,11 @@
 //! geofront/src/state.rs
 //! Global state management.
 
+use crate::cache::RouterMotdCache;
 use crate::types::{
     ConnMetrics, ConnectionManager, DisconnectionEvent, GeofrontOptions, ListenerState,
     MotdDecision, MotdRequest, ProxyConnection, RouteDecision, RouteRequest,
 };
-use crate::cache::RouterMotdCache;
 use governor::{
     RateLimiter,
     clock::DefaultClock,
@@ -18,6 +18,13 @@ use std::{
 };
 use tokio::sync::{Mutex, oneshot};
 use tracing_subscriber::{filter::EnvFilter, reload::Handle as ReloadHandle};
+
+#[derive(Clone)]
+pub struct ConnectionRateLimiters {
+    pub send: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    pub recv: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    pub limited: bool,
+}
 
 // Global metrics counters
 pub static TOTAL_CONN: AtomicU64 = AtomicU64::new(0);
@@ -48,15 +55,8 @@ lazy_static! {
         Arc::new(std::sync::Mutex::new(ListenerState::new()));
     pub static ref CONN_MANAGER: Arc<std::sync::Mutex<ConnectionManager>> =
         Arc::new(std::sync::Mutex::new(ConnectionManager::new()));
-    pub static ref RATE_LIMITERS: std::sync::Mutex<
-        HashMap<
-            ProxyConnection,
-            (
-                Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-                Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-            ),
-        >,
-    > = std::sync::Mutex::new(HashMap::new());
+    pub static ref RATE_LIMITERS: std::sync::Mutex<HashMap<ProxyConnection, ConnectionRateLimiters>> =
+        std::sync::Mutex::new(HashMap::new());
     pub static ref LISTENER_COUNTER: AtomicU64 = AtomicU64::new(1);
     pub static ref CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
     pub static ref RELOAD_HANDLE: std::sync::Mutex<Option<ReloadHandle<EnvFilter, tracing_subscriber::Registry>>> =
@@ -67,7 +67,7 @@ lazy_static! {
     pub static ref FFI_MOTD_LOCK: Mutex<()> = Mutex::new(());
     // This lock serializes all FFI calls to the disconnection callback to prevent concurrency issues.
     pub static ref FFI_DISCONNECTION_LOCK: Mutex<()> = Mutex::new(());
-    
+
     // Router/MOTD cache instance
     pub static ref ROUTER_MOTD_CACHE: RouterMotdCache = RouterMotdCache::new();
 }

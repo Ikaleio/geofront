@@ -5,10 +5,10 @@ use crate::{
     connection::handle_conn,
     logging,
     state::{
-        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, DISCONNECTION_EVENT_QUEUE,
-        LISTENER_COUNTER, LISTENER_STATE, MOTD_REQUEST_QUEUE, OPTIONS, PENDING_MOTDS,
-        PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE, TOTAL_BYTES_RECV,
-        TOTAL_BYTES_SENT, TOTAL_CONN, ROUTER_MOTD_CACHE,
+        ACTIVE_CONN, CONN_COUNTER, CONN_MANAGER, CONN_METRICS, ConnectionRateLimiters,
+        DISCONNECTION_EVENT_QUEUE, LISTENER_COUNTER, LISTENER_STATE, MOTD_REQUEST_QUEUE, OPTIONS,
+        PENDING_MOTDS, PENDING_ROUTES, RATE_LIMITERS, RELOAD_HANDLE, ROUTE_REQUEST_QUEUE,
+        ROUTER_MOTD_CACHE, TOTAL_BYTES_RECV, TOTAL_BYTES_SENT, TOTAL_CONN,
     },
     types::{
         ConnMetrics, ConnMetricsSnapshot, GeofrontOptions, MetricsSnapshot, MotdDecision,
@@ -222,10 +222,14 @@ pub unsafe extern "C" fn proxy_start_listener(
                         CONN_METRICS.lock().unwrap().insert(conn_id, cm);
                         let unlimited =
                             Arc::new(RateLimiter::direct(Quota::per_second(nonzero!(u32::MAX))));
-                        RATE_LIMITERS
-                            .lock()
-                            .unwrap()
-                            .insert(conn_id, (unlimited.clone(), unlimited));
+                        RATE_LIMITERS.lock().unwrap().insert(
+                            conn_id,
+                            ConnectionRateLimiters {
+                                send: unlimited.clone(),
+                                recv: unlimited,
+                                limited: false,
+                            },
+                        );
                         let h = tokio::spawn(handle_conn(conn_id, inb));
                         CONN_MANAGER.lock().unwrap().insert(conn_id, h);
                     }
@@ -282,18 +286,22 @@ pub unsafe extern "C" fn proxy_set_rate_limit(
     recv_burst_bytes_per_sec: u64,
 ) -> ProxyError {
     let mut rl = RATE_LIMITERS.lock().unwrap();
-    if let Some((send_l, recv_l)) = rl.get_mut(&conn_id) {
+    if let Some(limiters) = rl.get_mut(&conn_id) {
         let send_avg = NonZeroU32::new(send_avg_bytes_per_sec as u32).unwrap_or(nonzero!(u32::MAX));
         let send_burst = NonZeroU32::new(send_burst_bytes_per_sec as u32).unwrap_or(send_avg);
         let recv_avg = NonZeroU32::new(recv_avg_bytes_per_sec as u32).unwrap_or(nonzero!(u32::MAX));
         let recv_burst = NonZeroU32::new(recv_burst_bytes_per_sec as u32).unwrap_or(recv_avg);
 
-        *send_l = Arc::new(RateLimiter::direct(
+        limiters.send = Arc::new(RateLimiter::direct(
             Quota::per_second(send_avg).allow_burst(send_burst),
         ));
-        *recv_l = Arc::new(RateLimiter::direct(
+        limiters.recv = Arc::new(RateLimiter::direct(
             Quota::per_second(recv_avg).allow_burst(recv_burst),
         ));
+        limiters.limited = send_avg.get() != u32::MAX
+            || send_burst.get() != u32::MAX
+            || recv_avg.get() != u32::MAX
+            || recv_burst.get() != u32::MAX;
 
         info!(
             conn = conn_id,
@@ -547,7 +555,7 @@ pub unsafe extern "C" fn proxy_get_cache_stats() -> *const c_char {
         "total_entries": stats.total_entries,
         "expired_entries": stats.expired_entries
     });
-    
+
     match serde_json::to_string(&stats_json) {
         Ok(json_str) => match CString::new(json_str) {
             Ok(c_str) => c_str.into_raw(),

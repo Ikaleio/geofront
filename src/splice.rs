@@ -411,7 +411,7 @@ where
         .cloned()
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "Metrics not found for connection"))?;
 
-    let (send_limiter, recv_limiter) = RATE_LIMITERS
+    let limiters = RATE_LIMITERS
         .lock()
         .unwrap()
         .get(&conn_id)
@@ -422,6 +422,16 @@ where
                 "Rate limiters not found for connection",
             )
         })?;
+
+    if limiters.limited {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "Rate limiting requires fallback copier",
+        ));
+    }
+
+    let send_limiter = limiters.send;
+    let recv_limiter = limiters.recv;
 
     let mut a_to_b = TransferState::Running(CopyBuffer::new(
         Pipe::new()?,
