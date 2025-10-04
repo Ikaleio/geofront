@@ -55,6 +55,7 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
                     conn = conn_id,
                     "Incomplete PROXY protocol header in strict mode, disconnecting."
                 );
+                let _ = inbound.shutdown().await;
                 cleanup_conn(conn_id);
                 return;
             }
@@ -143,6 +144,7 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
                             conn = conn_id,
                             "Missing or invalid PROXY protocol header in strict mode, disconnecting."
                         );
+                        let _ = inbound.shutdown().await;
                         cleanup_conn(conn_id);
                         return;
                     }
@@ -155,6 +157,7 @@ pub async fn handle_conn(conn_id: ProxyConnection, mut inbound: TcpStream) {
                     conn = conn_id,
                     "Missing or invalid PROXY protocol header in strict mode, disconnecting."
                 );
+                let _ = inbound.shutdown().await;
                 cleanup_conn(conn_id);
                 return;
             }
@@ -412,6 +415,7 @@ fn cleanup_conn(conn_id: ProxyConnection) {
 
     CONN_MANAGER.lock().unwrap().remove(&conn_id);
     CONN_METRICS.lock().unwrap().remove(&conn_id);
+    RATE_LIMITERS.lock().unwrap().remove(&conn_id);
     ACTIVE_CONN.fetch_sub(1, Ordering::SeqCst);
 }
 
@@ -894,18 +898,9 @@ async fn handle_status_request(
         return;
     }
 
-    // Handle ping request (if client sends one)
-    if let Ok(_packet_len) = protocol::read_varint(inbound).await {
-        if let Ok(packet_id) = protocol::read_varint(inbound).await {
-            if packet_id == 1 {
-                // Ping packet - read the payload and echo it back
-                if let Ok(payload) = inbound.read_u64().await {
-                    let response = create_ping_response(payload);
-                    let _ = inbound.write_all(&response).await;
-                }
-            }
-        }
-    }
+    info!(conn = conn_id, "Sent MOTD status response");
+    let _ = inbound.shutdown().await;
+    info!(conn = conn_id, "Completed MOTD status response");
 }
 
 /// Send status response packet with MOTD data
@@ -961,17 +956,6 @@ async fn send_status_response(
     packet.extend(payload);
 
     stream.write_all(&packet).await
-}
-
-/// Create ping response packet
-fn create_ping_response(payload: u64) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.extend(write_varint(0x01)); // Pong packet ID
-    data.extend(&payload.to_be_bytes());
-
-    let mut packet = write_varint(data.len() as i32);
-    packet.extend(data);
-    packet
 }
 
 /// Asynchronously requests MOTD information via FFI and waits for the decision.
