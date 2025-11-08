@@ -7,6 +7,6 @@ pub mod connection;
 pub mod ffi;
 pub mod logging;
 pub mod protocol;
-pub mod state;
 pub mod splice;
+pub mod state;
 pub mod types;
